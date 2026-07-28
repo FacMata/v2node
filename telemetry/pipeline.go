@@ -213,6 +213,13 @@ func (p *Pipeline) runSender(ctx context.Context) {
 			continue
 		}
 		if err != nil {
+			if errors.Is(err, ErrQueueRecordInvalid) {
+				if dropErr := p.queue.DropHead(); dropErr == nil {
+					p.quarantined.Add(1)
+					backoff = p.config.RetryMin
+					continue
+				}
+			}
 			if !waitForRetry(ctx, jitter(backoff)) {
 				return
 			}

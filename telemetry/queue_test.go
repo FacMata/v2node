@@ -92,6 +92,48 @@ func TestDiskQueueRejectsWrongKey(t *testing.T) {
 	_ = queue.Close()
 }
 
+func TestDiskQueueCanDropInvalidHeadWithoutBlockingLaterRecords(t *testing.T) {
+	directory := t.TempDir()
+	streamID := uuid.New()
+	queue := openTestQueue(t, directory, streamID, bytes.Repeat([]byte{7}, 32))
+	now := time.Now().UTC()
+	for sequence := uint64(1); sequence <= 2; sequence++ {
+		if err := queue.Enqueue(QueueRecord{
+			ID:            uuid.New(),
+			CreatedAt:     now,
+			SequenceFirst: sequence,
+			SequenceLast:  sequence,
+			Payload:       []byte{byte(sequence)},
+		}); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", sequence, err)
+		}
+	}
+	files, err := queue.filesLocked()
+	if err != nil {
+		t.Fatalf("filesLocked() error = %v", err)
+	}
+	if err := os.WriteFile(files[0], []byte("corrupt"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := queue.Peek(); !errors.Is(err, ErrQueueRecordInvalid) {
+		t.Fatalf("Peek() error = %v, want ErrQueueRecordInvalid", err)
+	}
+	if err := queue.DropHead(); err != nil {
+		t.Fatalf("DropHead() error = %v", err)
+	}
+	record, err := queue.Peek()
+	if err != nil {
+		t.Fatalf("Peek(second) error = %v", err)
+	}
+	if record.SequenceFirst != 2 {
+		t.Fatalf("second sequence = %d, want 2", record.SequenceFirst)
+	}
+	if queue.DroppedCount() != 1 {
+		t.Fatalf("dropped count = %d, want 1", queue.DroppedCount())
+	}
+}
+
 func TestDiskQueueExpiresOldestRecords(t *testing.T) {
 	directory := t.TempDir()
 	streamID := uuid.New()

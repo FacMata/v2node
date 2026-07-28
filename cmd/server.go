@@ -155,7 +155,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			return
 		case <-reloadCh:
 			log.Info("收到重启信号，正在重新加载配置...")
-			if err := reload(config, &nodes, &v2core, telemetryManager); err != nil {
+			if err := reload(config, &nodes, &v2core, &telemetryManager); err != nil {
 				log.WithField("err", err).Panic("重启失败")
 			}
 			log.Info("重启成功")
@@ -167,7 +167,7 @@ func reload(
 	config string,
 	nodes **node.Node,
 	v2core **core.V2Core,
-	telemetryManager *telemetry.Manager,
+	telemetryManager **telemetry.Manager,
 ) error {
 	// Preserve old reload channel so new core continues to receive signals
 	var oldReloadCh chan struct{}
@@ -180,6 +180,9 @@ func reload(
 	}
 
 	if err := (*v2core).Close(); err != nil {
+		return err
+	}
+	if err := (*telemetryManager).Close(); err != nil {
 		return err
 	}
 	newConf := conf.New()
@@ -214,21 +217,35 @@ func reload(
 	if err != nil {
 		return err
 	}
+	newTelemetry, telemetryErr := newTelemetryManager(newConf)
+	if telemetryErr != nil {
+		log.WithField("err", telemetryErr).
+			Error("Telemetry disabled for invalid node configurations")
+	}
+	if newTelemetry == nil {
+		newTelemetry, _ = telemetry.NewManager()
+	}
+	newTelemetry.Start(context.Background())
 	newCore := core.New(newConf)
 	// Reattach reload channel
 	newCore.ReloadCh = oldReloadCh
-	newCore.SetTelemetrySink(telemetryManager)
+	newCore.SetTelemetrySink(newTelemetry)
 	if err := newCore.Start(newNodes.NodeInfos); err != nil {
+		_ = newNodes.Close()
+		_ = newTelemetry.Close()
 		return err
 	}
 
 	if err := newNodes.Start(newConf.NodeConfigs, newCore); err != nil {
+		_ = newNodes.Close()
 		_ = newCore.Close()
+		_ = newTelemetry.Close()
 		return err
 	}
 
 	*nodes = newNodes
 	*v2core = newCore
+	*telemetryManager = newTelemetry
 
 	runtime.GC()
 	return nil

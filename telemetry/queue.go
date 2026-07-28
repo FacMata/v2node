@@ -26,8 +26,9 @@ const (
 )
 
 var (
-	ErrQueueEmpty = errors.New("telemetry queue is empty")
-	ErrQueueFull  = errors.New("telemetry queue is full")
+	ErrQueueEmpty         = errors.New("telemetry queue is empty")
+	ErrQueueFull          = errors.New("telemetry queue is full")
+	ErrQueueRecordInvalid = errors.New("telemetry queue record is invalid")
 )
 
 type QueueConfig struct {
@@ -222,18 +223,28 @@ func (q *DiskQueue) Peek() (QueueRecord, error) {
 	}
 	header, nonce, ciphertext, aad, err := unmarshalQueueRecord(data)
 	if err != nil {
-		return QueueRecord{}, err
+		return QueueRecord{}, fmt.Errorf("%w: %v", ErrQueueRecordInvalid, err)
 	}
 	if header.nodeID != q.config.NodeID || header.streamID != q.config.StreamID {
-		return QueueRecord{}, fmt.Errorf("queue record owner mismatch")
+		return QueueRecord{}, fmt.Errorf(
+			"%w: owner mismatch",
+			ErrQueueRecordInvalid,
+		)
 	}
 	aead, ok := q.aeads[header.keyVersion]
 	if !ok {
-		return QueueRecord{}, fmt.Errorf("queue key version %d is unavailable", header.keyVersion)
+		return QueueRecord{}, fmt.Errorf(
+			"%w: key version %d is unavailable",
+			ErrQueueRecordInvalid,
+			header.keyVersion,
+		)
 	}
 	plaintext, err := aead.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
-		return QueueRecord{}, fmt.Errorf("authenticate queue record: %w", err)
+		return QueueRecord{}, fmt.Errorf(
+			"%w: authentication failed",
+			ErrQueueRecordInvalid,
+		)
 	}
 	return QueueRecord{
 		ID:            header.recordID,
@@ -242,6 +253,23 @@ func (q *DiskQueue) Peek() (QueueRecord, error) {
 		SequenceLast:  header.sequenceLast,
 		Payload:       plaintext,
 	}, nil
+}
+
+func (q *DiskQueue) DropHead() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	files, err := q.filesLocked()
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return ErrQueueEmpty
+	}
+	if err := os.Remove(files[0]); err != nil {
+		return fmt.Errorf("drop queue head: %w", err)
+	}
+	q.dropped.Add(1)
+	return syncDirectory(q.config.Directory)
 }
 
 func (q *DiskQueue) Ack(id uuid.UUID) error {
@@ -348,7 +376,7 @@ func (q *DiskQueue) purgeExpiredLocked() error {
 		}
 		header, _, _, _, err := unmarshalQueueRecord(data)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %v", ErrQueueRecordInvalid, err)
 		}
 		if time.UnixMilli(header.createdAtMS).UTC().After(cutoff) {
 			continue
