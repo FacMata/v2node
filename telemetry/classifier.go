@@ -65,18 +65,19 @@ type Classification struct {
 }
 
 type Catalog struct {
-	Version    string
-	ValidUntil time.Time
-	Rules      []ProbeRule
+	Version    string      `json:"version"`
+	ValidUntil time.Time   `json:"valid_until"`
+	Rules      []ProbeRule `json:"rules"`
 }
 
 type ProbeRule struct {
-	ID          string
-	Host        string
-	MatchSuffix bool
-	Ports       []uint16
-	Protocols   []AppProtocol
-	Confidence  Confidence
+	ID          string        `json:"id"`
+	Host        string        `json:"host"`
+	MatchSuffix bool          `json:"match_suffix"`
+	Ports       []uint16      `json:"ports"`
+	Protocols   []AppProtocol `json:"protocols"`
+	Confidence  Confidence    `json:"confidence"`
+	Enabled     *bool         `json:"enabled,omitempty"`
 }
 
 type compiledRule struct {
@@ -105,6 +106,9 @@ func NewClassifier(catalog Catalog, now func() time.Time) (*Classifier, error) {
 	rules := make([]compiledRule, 0, len(catalog.Rules))
 	ids := make(map[string]struct{}, len(catalog.Rules))
 	for _, rule := range catalog.Rules {
+		if rule.Enabled != nil && !*rule.Enabled {
+			continue
+		}
 		if !validRuleID(rule.ID) {
 			return nil, fmt.Errorf("probe rule ID %q is invalid", rule.ID)
 		}

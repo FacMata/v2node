@@ -17,6 +17,12 @@ wget -N https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.s
 GOEXPERIMENT=jsonv2 go build -v -o build_assets/v2node -trimpath -ldflags "-X 'github.com/wyx2685/v2node/cmd.version=$version' -s -w -buildid="
 ```
 
+## 连接遥测
+
+连接遥测默认关闭。部署字段、密钥环境变量与签名分类目录格式见
+[`docs/telemetry.md`](docs/telemetry.md)。遥测配置或密钥无效时只禁用对应
+节点的遥测，不影响代理转发。
+
 ## Stars 增长记录
 
 [![Stargazers over time](https://starchart.cc/wyx2685/v2node.svg?variant=adaptive)](https://starchart.cc/wyx2685/v2node)

@@ -3,6 +3,8 @@ package conf
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -23,11 +25,34 @@ type LogConfig struct {
 }
 
 type NodeConfig struct {
-	APIHost    string `mapstructure:"ApiHost"`
-	NodeID     int    `mapstructure:"NodeID"`
-	Key        string `mapstructure:"ApiKey"`
-	Timeout    int    `mapstructure:"Timeout"`
-	RetryCount *int   `mapstructure:"RetryCount"`
+	APIHost    string          `mapstructure:"ApiHost"`
+	NodeID     int             `mapstructure:"NodeID"`
+	Key        string          `mapstructure:"ApiKey"`
+	Timeout    int             `mapstructure:"Timeout"`
+	RetryCount *int            `mapstructure:"RetryCount"`
+	Telemetry  TelemetryConfig `mapstructure:"Telemetry"`
+}
+
+type TelemetryConfig struct {
+	Enabled                   bool   `mapstructure:"Enabled"`
+	Endpoint                  string `mapstructure:"Endpoint"`
+	KeyID                     string `mapstructure:"KeyID"`
+	SecretEnv                 string `mapstructure:"SecretEnv"`
+	SourceSealingPublicKey    string `mapstructure:"SourceSealingPublicKey"`
+	SourceSealingKeyVersion   uint16 `mapstructure:"SourceSealingKeyVersion"`
+	ClassifierCatalogPath     string `mapstructure:"ClassifierCatalogPath"`
+	ClassifierVerificationKey string `mapstructure:"ClassifierVerificationKey"`
+	QueueDirectory            string `mapstructure:"QueueDirectory"`
+	QueueKeyEnv               string `mapstructure:"QueueKeyEnv"`
+	QueueKeyVersion           uint16 `mapstructure:"QueueKeyVersion"`
+	QueueMaxBytes             int64  `mapstructure:"QueueMaxBytes"`
+	QueueMaxAgeSeconds        int    `mapstructure:"QueueMaxAgeSeconds"`
+	BufferSize                int    `mapstructure:"BufferSize"`
+	FlushIntervalSeconds      int    `mapstructure:"FlushIntervalSeconds"`
+	RequestTimeoutSeconds     int    `mapstructure:"RequestTimeoutSeconds"`
+	RetryMinSeconds           int    `mapstructure:"RetryMinSeconds"`
+	RetryMaxSeconds           int    `mapstructure:"RetryMaxSeconds"`
+	ShutdownTimeoutSeconds    int    `mapstructure:"ShutdownTimeoutSeconds"`
 }
 
 func New() *Conf {
@@ -58,8 +83,53 @@ func (p *Conf) LoadFromPath(filePath string) error {
 		if p.NodeConfigs[i].RetryCount == nil {
 			p.NodeConfigs[i].RetryCount = intPtr(DefaultNodeRetryCount)
 		}
+		applyTelemetryDefaults(&p.NodeConfigs[i])
 	}
 	return nil
+}
+
+func applyTelemetryDefaults(node *NodeConfig) {
+	telemetry := &node.Telemetry
+	if !telemetry.Enabled {
+		return
+	}
+	if telemetry.Endpoint == "" {
+		telemetry.Endpoint = strings.TrimRight(node.APIHost, "/") +
+			"/api/v2/server/telemetry/connection-buckets"
+	}
+	if telemetry.QueueDirectory == "" {
+		telemetry.QueueDirectory = filepath.Join(
+			"/var/lib/v2node/telemetry",
+			fmt.Sprintf("%d", node.NodeID),
+		)
+	}
+	if telemetry.QueueKeyVersion == 0 {
+		telemetry.QueueKeyVersion = 1
+	}
+	if telemetry.QueueMaxBytes == 0 {
+		telemetry.QueueMaxBytes = 256 * 1024 * 1024
+	}
+	if telemetry.QueueMaxAgeSeconds == 0 {
+		telemetry.QueueMaxAgeSeconds = 6 * 60 * 60
+	}
+	if telemetry.BufferSize == 0 {
+		telemetry.BufferSize = 4096
+	}
+	if telemetry.FlushIntervalSeconds == 0 {
+		telemetry.FlushIntervalSeconds = 5
+	}
+	if telemetry.RequestTimeoutSeconds == 0 {
+		telemetry.RequestTimeoutSeconds = 10
+	}
+	if telemetry.RetryMinSeconds == 0 {
+		telemetry.RetryMinSeconds = 1
+	}
+	if telemetry.RetryMaxSeconds == 0 {
+		telemetry.RetryMaxSeconds = 60
+	}
+	if telemetry.ShutdownTimeoutSeconds == 0 {
+		telemetry.ShutdownTimeoutSeconds = 5
+	}
 }
 
 func intPtr(v int) *int {

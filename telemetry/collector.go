@@ -29,6 +29,7 @@ type Collector struct {
 	closed     bool
 	pending    Emission
 	emitErrors atomic.Uint64
+	dropped    atomic.Uint64
 	closeOnce  sync.Once
 }
 
@@ -70,12 +71,14 @@ func (c *Collector) Observe(observation Observation) bool {
 	c.lifecycle.RLock()
 	defer c.lifecycle.RUnlock()
 	if c.closed {
+		c.dropped.Add(1)
 		return false
 	}
 	select {
 	case c.input <- observation:
 		return true
 	default:
+		c.dropped.Add(1)
 		return false
 	}
 }
@@ -99,6 +102,10 @@ func (c *Collector) EmitErrorCount() uint64 {
 	return c.emitErrors.Load()
 }
 
+func (c *Collector) DroppedObservationCount() uint64 {
+	return c.dropped.Load()
+}
+
 func (c *Collector) run(ctx context.Context) {
 	defer close(c.done)
 	ticker := time.NewTicker(c.config.FlushInterval)
@@ -107,9 +114,11 @@ func (c *Collector) run(ctx context.Context) {
 	for {
 		select {
 		case observation := <-c.input:
-			c.aggregator.Observe(observation)
+			if !c.aggregator.Observe(observation) {
+				c.dropped.Add(1)
+			}
 		case <-ticker.C:
-			c.flush(time.Now().UTC().Truncate(time.Minute))
+			_ = c.flush(time.Now().UTC().Truncate(time.Minute))
 		case <-ctx.Done():
 			c.drainAndFlush()
 			return
@@ -124,24 +133,28 @@ func (c *Collector) drainAndFlush() {
 	for {
 		select {
 		case observation := <-c.input:
-			c.aggregator.Observe(observation)
+			if !c.aggregator.Observe(observation) {
+				c.dropped.Add(1)
+			}
 		default:
-			c.flush(time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC))
+			for c.flush(time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)) {
+			}
 			return
 		}
 	}
 }
 
-func (c *Collector) flush(cutoff time.Time) {
+func (c *Collector) flush(cutoff time.Time) bool {
 	if len(c.pending.Buckets) == 0 {
 		c.pending = c.aggregator.FlushBefore(cutoff)
 	}
 	if len(c.pending.Buckets) == 0 {
-		return
+		return false
 	}
 	if err := c.emit(c.pending); err != nil {
 		c.emitErrors.Add(1)
-		return
+		return false
 	}
 	c.pending = Emission{}
+	return true
 }

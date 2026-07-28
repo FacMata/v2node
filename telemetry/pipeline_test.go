@@ -1,0 +1,213 @@
+package telemetry
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"golang.org/x/crypto/nacl/box"
+)
+
+func TestPipelineQueuesSendsAndAcknowledgesBatch(t *testing.T) {
+	received := make(chan Batch, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("ReadAll() error = %v", err)
+			return
+		}
+		var batch Batch
+		if err := json.Unmarshal(body, &batch); err != nil {
+			t.Errorf("Unmarshal() error = %v", err)
+			return
+		}
+		received <- batch
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"accepted":  len(batch.Buckets),
+				"duplicate": false,
+			},
+		})
+	}))
+	defer server.Close()
+
+	directory := t.TempDir()
+	pipeline := newTestPipeline(t, directory, server.URL)
+	pipeline.Start(context.Background())
+	if !pipeline.Observe(Observation{
+		ObservedAt:  time.Now().UTC().Add(-2 * time.Minute),
+		UserID:      42,
+		NodeID:      7,
+		SourceIP:    netip.MustParseAddr("1.2.3.4"),
+		Destination: Destination{Address: "1.1.1.1", Port: 80, Kind: DestinationIPv4, AppProtocol: AppProtocolHTTP},
+		Network:     NetworkTCP,
+		AppProtocol: AppProtocolHTTP,
+	}) {
+		t.Fatal("Observe() rejected")
+	}
+
+	select {
+	case batch := <-received:
+		if batch.NodeID != 7 || len(batch.Buckets) != 1 || batch.SequenceFirst != 1 {
+			t.Fatalf("batch = %#v", batch)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pipeline did not send batch")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := pipeline.queue.Peek(); err == ErrQueueEmpty {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pipeline did not acknowledge queue record")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := pipeline.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	state, err := openStreamState(directory, 7)
+	if err != nil {
+		t.Fatalf("openStreamState() error = %v", err)
+	}
+	if state.NextSequence != 2 {
+		t.Fatalf("next sequence = %d, want 2", state.NextSequence)
+	}
+}
+
+func newTestPipeline(t *testing.T, directory, endpoint string) *Pipeline {
+	t.Helper()
+	now := time.Now().UTC()
+	classifier, err := NewClassifier(Catalog{
+		Version:    "test-v1",
+		ValidUntil: now.Add(time.Hour),
+		Rules: []ProbeRule{{
+			ID:         "cloudflare_one_http",
+			Host:       "1.1.1.1",
+			Ports:      []uint16{80},
+			Protocols:  []AppProtocol{AppProtocolHTTP},
+			Confidence: ConfidenceHigh,
+		}},
+	}, time.Now)
+	if err != nil {
+		t.Fatalf("NewClassifier() error = %v", err)
+	}
+	publicKey, _, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	secret := bytes.Repeat([]byte{1}, 32)
+	protector, err := NewSourceProtector("test-key", secret, 1, publicKey[:])
+	if err != nil {
+		t.Fatalf("NewSourceProtector() error = %v", err)
+	}
+	aggregator := NewAggregator(classifier, protector)
+	state, err := openStreamState(directory, 7)
+	if err != nil {
+		t.Fatalf("openStreamState() error = %v", err)
+	}
+	queue, err := OpenDiskQueue(QueueConfig{
+		Directory:       filepath.Join(directory, "queue"),
+		NodeID:          7,
+		StreamID:        state.StreamID,
+		WriteKeyVersion: 1,
+		Keys:            map[uint16][]byte{1: bytes.Repeat([]byte{2}, 32)},
+		MaxBytes:        1024 * 1024,
+		MaxAge:          6 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("OpenDiskQueue() error = %v", err)
+	}
+	signer, err := NewSigner(7, "test-key", secret)
+	if err != nil {
+		t.Fatalf("NewSigner() error = %v", err)
+	}
+	sender, err := NewSender(SenderConfig{Endpoint: endpoint, Timeout: time.Second}, signer)
+	if err != nil {
+		t.Fatalf("NewSender() error = %v", err)
+	}
+	pipeline, err := NewPipeline(PipelineConfig{
+		NodeID:            7,
+		CollectorVersion:  "test",
+		ClassifierVersion: "test-v1",
+		StateDirectory:    directory,
+		BufferSize:        16,
+		FlushInterval:     5 * time.Millisecond,
+		RetryMin:          5 * time.Millisecond,
+		RetryMax:          20 * time.Millisecond,
+		ShutdownTimeout:   100 * time.Millisecond,
+	}, aggregator, queue, sender)
+	if err != nil {
+		t.Fatalf("NewPipeline() error = %v", err)
+	}
+	return pipeline
+}
+
+func TestManagerRoutesByNodeID(t *testing.T) {
+	manager := &Manager{pipelines: map[uint64]*Pipeline{}}
+	if manager.Observe(Observation{NodeID: 999}) {
+		t.Fatal("Observe() accepted unknown node")
+	}
+}
+
+func TestPipelineKeepsQueuedBatchWhenStatePersistFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"accepted": 1, "duplicate": false},
+		})
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	pipeline := newTestPipeline(t, directory, server.URL)
+	pipeline.state.path = directory
+
+	emission := Emission{
+		Sources: []SourceEnvelope{{
+			SourceRef:         "source",
+			SealedIP:          "sealed",
+			SealingKeyVersion: 1,
+		}},
+		Buckets: []Bucket{{
+			BucketID:          uuid.NewString(),
+			BucketStart:       MillisTime{Time: time.Now().UTC().Truncate(time.Minute)},
+			UserID:            42,
+			SourceRef:         "source",
+			DestinationClass:  DestinationOther,
+			ConnectionCount:   1,
+			ClassifierVersion: "test-v1",
+		}},
+	}
+	if err := pipeline.enqueueEmission(emission); err != nil {
+		t.Fatalf("enqueueEmission() error = %v", err)
+	}
+	if pipeline.StatePersistErrorCount() != 1 {
+		t.Fatalf("state error count = %d, want 1", pipeline.StatePersistErrorCount())
+	}
+	if _, next := pipeline.state.snapshot(); next != 2 {
+		t.Fatalf("next sequence = %d, want 2", next)
+	}
+	if _, err := pipeline.queue.Peek(); err != nil {
+		t.Fatalf("Peek() error = %v", err)
+	}
+	_ = pipeline.Close()
+}
+
+func TestRetryAfterDelayHonorsServerBound(t *testing.T) {
+	if got := retryAfterDelay("10", time.Second, 30*time.Second); got != 10*time.Second {
+		t.Fatalf("retry delay = %s, want 10s", got)
+	}
+	if got := retryAfterDelay("120", time.Second, 30*time.Second); got != 30*time.Second {
+		t.Fatalf("capped retry delay = %s, want 30s", got)
+	}
+}

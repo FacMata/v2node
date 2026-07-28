@@ -275,6 +275,34 @@ func (q *DiskQueue) DroppedCount() uint64 {
 	return q.dropped.Load()
 }
 
+func (q *DiskQueue) TakeDroppedCount() uint64 {
+	return q.dropped.Swap(0)
+}
+
+func (q *DiskQueue) LastSequence() (uint64, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	files, err := q.filesLocked()
+	if err != nil {
+		return 0, err
+	}
+	var last uint64
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return 0, fmt.Errorf("read queue sequence: %w", err)
+		}
+		header, _, _, _, err := unmarshalQueueRecord(data)
+		if err != nil {
+			return 0, err
+		}
+		if header.sequenceLast > last {
+			last = header.sequenceLast
+		}
+	}
+	return last, nil
+}
+
 func (q *DiskQueue) filesLocked() ([]string, error) {
 	files, err := filepath.Glob(filepath.Join(q.config.Directory, "*.tq"))
 	if err != nil {

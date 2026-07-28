@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
@@ -15,6 +16,7 @@ import (
 	"github.com/wyx2685/v2node/core"
 	"github.com/wyx2685/v2node/limiter"
 	"github.com/wyx2685/v2node/node"
+	"github.com/wyx2685/v2node/telemetry"
 )
 
 var (
@@ -87,20 +89,31 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		return
 	}
 	log.Info("Got nodes info from server")
+	telemetryManager, err := newTelemetryManager(c)
+	if err != nil {
+		log.WithField("err", err).Error("Telemetry disabled for invalid node configurations")
+	}
+	if telemetryManager == nil {
+		telemetryManager, _ = telemetry.NewManager()
+	}
+	telemetryManager.Start(context.Background())
 	//core
 	var reloadCh = make(chan struct{}, 1)
 	v2core := core.New(c)
 	v2core.ReloadCh = reloadCh
+	v2core.SetTelemetrySink(telemetryManager)
 	err = v2core.Start(nodes.NodeInfos)
 	if err != nil {
 		log.WithField("err", err).Error("Start core failed")
+		_ = telemetryManager.Close()
 		return
 	}
-	defer v2core.Close()
 	//node
 	err = nodes.Start(c.NodeConfigs, v2core)
 	if err != nil {
 		log.WithField("err", err).Error("Run nodes failed")
+		_ = v2core.Close()
+		_ = telemetryManager.Close()
 		return
 	}
 	log.Info("Nodes started")
@@ -114,6 +127,9 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		})
 		if err != nil {
 			log.WithField("err", err).Error("start watch failed")
+			_ = nodes.Close()
+			_ = v2core.Close()
+			_ = telemetryManager.Close()
 			return
 		}
 	}
@@ -127,10 +143,19 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		select {
 		case <-osSignals:
 			log.Info("收到退出信号，正在关闭程序...")
-			os.Exit(0)
+			if err := nodes.Close(); err != nil {
+				log.WithField("err", err).Warn("close nodes failed")
+			}
+			if err := v2core.Close(); err != nil {
+				log.WithField("err", err).Warn("close core failed")
+			}
+			if err := telemetryManager.Close(); err != nil {
+				log.WithField("err", err).Warn("close telemetry failed")
+			}
+			return
 		case <-reloadCh:
 			log.Info("收到重启信号，正在重新加载配置...")
-			if err := reload(config, &nodes, &v2core); err != nil {
+			if err := reload(config, &nodes, &v2core, telemetryManager); err != nil {
 				log.WithField("err", err).Panic("重启失败")
 			}
 			log.Info("重启成功")
@@ -138,7 +163,12 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 }
 
-func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
+func reload(
+	config string,
+	nodes **node.Node,
+	v2core **core.V2Core,
+	telemetryManager *telemetry.Manager,
+) error {
 	// Preserve old reload channel so new core continues to receive signals
 	var oldReloadCh chan struct{}
 	if *v2core != nil {
@@ -152,7 +182,6 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 	if err := (*v2core).Close(); err != nil {
 		return err
 	}
-
 	newConf := conf.New()
 	if err := newConf.LoadFromPath(config); err != nil {
 		return err
@@ -185,15 +214,16 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 	if err != nil {
 		return err
 	}
-
 	newCore := core.New(newConf)
 	// Reattach reload channel
 	newCore.ReloadCh = oldReloadCh
+	newCore.SetTelemetrySink(telemetryManager)
 	if err := newCore.Start(newNodes.NodeInfos); err != nil {
 		return err
 	}
 
 	if err := newNodes.Start(newConf.NodeConfigs, newCore); err != nil {
+		_ = newCore.Close()
 		return err
 	}
 

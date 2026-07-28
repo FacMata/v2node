@@ -16,6 +16,9 @@ const (
 	bucketDuration                         = time.Minute
 	maxDimensionRowsPerUserMinute          = 64
 	maxUnknownDestinationsPerBucket uint32 = 4096
+	maxPendingBuckets                      = 32768
+	maxBucketsPerEmission                  = 300
+	maxSourcesPerEmission                  = 256
 )
 
 var bucketNamespace = uuid.MustParse("c6c71bb1-cf48-4422-abda-880ee6f4b3e6")
@@ -188,6 +191,9 @@ func (a *Aggregator) Observe(observation Observation) bool {
 
 	entry := a.buckets[key]
 	if entry == nil {
+		if len(a.buckets) >= maxPendingBuckets {
+			return false
+		}
 		if a.dimensionCountLocked(key) >= maxDimensionRowsPerUserMinute {
 			return false
 		}
@@ -243,6 +249,11 @@ func (a *Aggregator) FlushBefore(cutoff time.Time) Emission {
 	buckets := make([]Bucket, 0)
 	for key, entry := range a.buckets {
 		if key.bucketStart.Add(bucketDuration).After(cutoff) {
+			continue
+		}
+		_, sourceAlreadyIncluded := sources[key.sourceRef]
+		if len(buckets) >= maxBucketsPerEmission ||
+			(!sourceAlreadyIncluded && len(sources) >= maxSourcesPerEmission) {
 			continue
 		}
 		sources[key.sourceRef] = SourceEnvelope{
