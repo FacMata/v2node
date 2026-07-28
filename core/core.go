@@ -8,6 +8,7 @@ import (
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
 	_ "github.com/wyx2685/v2node/core/distro/all"
+	"github.com/wyx2685/v2node/telemetry"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/stats"
 	"github.com/xtls/xray-core/common/serial"
@@ -34,6 +35,7 @@ type V2Core struct {
 	ihm        inbound.Manager
 	ohm        outbound.Manager
 	dispatcher *dispatcher.DefaultDispatcher
+	telemetry  telemetry.Sink
 }
 
 type UserMap struct {
@@ -61,7 +63,16 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
+	if v.telemetry != nil {
+		v.dispatcher.SetTelemetrySink(newTelemetryAdapter(v.users, infos, v.telemetry))
+	}
 	return nil
+}
+
+func (v *V2Core) SetTelemetrySink(sink telemetry.Sink) {
+	v.access.Lock()
+	defer v.access.Unlock()
+	v.telemetry = sink
 }
 
 func (v *V2Core) Close() error {

@@ -6,11 +6,13 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/rate"
 	"github.com/wyx2685/v2node/limiter"
+	"github.com/wyx2685/v2node/telemetry"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
@@ -105,8 +107,13 @@ type DefaultDispatcher struct {
 	policy       policy.Manager
 	stats        stats.Manager
 	fdns         dns.FakeDNSEngine
+	telemetry    atomic.Pointer[telemetrySinkHolder]
 	Counter      sync.Map
 	LinkManagers sync.Map // map[string]*LinkManager
+}
+
+type telemetrySinkHolder struct {
+	sink telemetry.RawSink
 }
 
 func init() {
@@ -145,6 +152,31 @@ func (*DefaultDispatcher) Start() error {
 
 // Close implements common.Closable.
 func (*DefaultDispatcher) Close() error { return nil }
+
+func (d *DefaultDispatcher) SetTelemetrySink(sink telemetry.RawSink) {
+	if sink == nil {
+		d.telemetry.Store(nil)
+		return
+	}
+	d.telemetry.Store(&telemetrySinkHolder{sink: sink})
+}
+
+func (d *DefaultDispatcher) observeTelemetry(
+	ctx context.Context,
+	destination net.Destination,
+	result SniffResult,
+	observedAt time.Time,
+) {
+	holder := d.telemetry.Load()
+	if holder == nil {
+		return
+	}
+	observation, ok := rawTelemetryObservation(ctx, destination, result, observedAt)
+	if !ok {
+		return
+	}
+	holder.sink.ObserveRaw(observation)
+}
 
 func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
 	opt := pipe.OptionsFromContext(ctx)
@@ -288,11 +320,13 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 		ctx = session.ContextWithContent(ctx, content)
 	}
 	sniffingRequest := content.SniffingRequest
+	observedAt := time.Now().UTC()
 	inbound, outbound, _, err := d.getLink(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if !sniffingRequest.Enabled {
+		d.observeTelemetry(ctx, destination, nil, observedAt)
 		go d.routedDispatch(ctx, outbound, destination)
 	} else {
 		go func() {
@@ -322,6 +356,10 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 					ob.Target = destination
 				}
 			}
+			if err != nil {
+				result = nil
+			}
+			d.observeTelemetry(ctx, ob.OriginalTarget, result, observedAt)
 			d.routedDispatch(ctx, outbound, destination)
 		}()
 	}
@@ -413,7 +451,9 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	}
 
 	sniffingRequest := content.SniffingRequest
+	observedAt := time.Now().UTC()
 	if !sniffingRequest.Enabled {
+		d.observeTelemetry(ctx, destination, nil, observedAt)
 		d.routedDispatch(ctx, outbound, destination)
 	} else {
 		cReader := &cachedReader{
@@ -442,6 +482,10 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 				ob.Target = destination
 			}
 		}
+		if err != nil {
+			result = nil
+		}
+		d.observeTelemetry(ctx, ob.OriginalTarget, result, observedAt)
 		d.routedDispatch(ctx, outbound, destination)
 	}
 
