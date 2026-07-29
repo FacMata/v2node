@@ -105,19 +105,19 @@ type aggregateKey struct {
 	sourceRef         string
 	destinationClass  DestinationClass
 	probeSignature    string
-	probeConfidence   Confidence
 	destinationKind   DestinationKind
 	destinationPort   uint16
 	network           Network
 	appProtocol       AppProtocol
 	sniffSource       SniffSource
-	sniffConfidence   Confidence
 	classifierVersion string
 }
 
 type accumulator struct {
 	key                aggregateKey
 	source             ProtectedSource
+	probeConfidence    Confidence
+	sniffConfidence    Confidence
 	connectionCount    uint32
 	uploadBytes        uint64
 	downloadBytes      uint64
@@ -174,13 +174,11 @@ func (a *Aggregator) Observe(observation Observation) bool {
 		sourceRef:         source.Ref,
 		destinationClass:  classification.Class,
 		probeSignature:    classification.Signature,
-		probeConfidence:   classification.Confidence,
 		destinationKind:   classification.DestinationKind,
 		destinationPort:   observation.Destination.Port,
 		network:           normalizeNetwork(observation.Network),
 		appProtocol:       normalizeAppProtocol(observation.AppProtocol),
 		sniffSource:       normalizeSniffSource(observation.SniffSource),
-		sniffConfidence:   normalizeConfidence(observation.Confidence),
 		classifierVersion: classification.CatalogVersion,
 	}
 
@@ -198,10 +196,20 @@ func (a *Aggregator) Observe(observation Observation) bool {
 		entry = &accumulator{
 			key:              key,
 			source:           source,
+			probeConfidence:  normalizeConfidence(classification.Confidence),
+			sniffConfidence:  normalizeConfidence(observation.Confidence),
 			unknownAddresses: make(map[string]struct{}),
 		}
 		a.buckets[key] = entry
 	}
+	entry.probeConfidence = higherConfidence(
+		entry.probeConfidence,
+		normalizeConfidence(classification.Confidence),
+	)
+	entry.sniffConfidence = higherConfidence(
+		entry.sniffConfidence,
+		normalizeConfidence(observation.Confidence),
+	)
 	entry.connectionCount++
 	entry.uploadBytes += observation.UploadBytes
 	entry.downloadBytes += observation.DownloadBytes
@@ -287,13 +295,13 @@ func (a *accumulator) bucket() Bucket {
 		SourceRef:          a.key.sourceRef,
 		DestinationClass:   a.key.destinationClass,
 		ProbeSignature:     a.key.probeSignature,
-		ProbeConfidence:    a.key.probeConfidence,
+		ProbeConfidence:    a.probeConfidence,
 		DestinationKind:    a.key.destinationKind,
 		DestinationPort:    a.key.destinationPort,
 		Network:            a.key.network,
 		AppProtocol:        a.key.appProtocol,
 		SniffSource:        a.key.sniffSource,
-		SniffConfidence:    a.key.sniffConfidence,
+		SniffConfidence:    a.sniffConfidence,
 		ConnectionCount:    a.connectionCount,
 		UploadBytes:        a.uploadBytes,
 		DownloadBytes:      a.downloadBytes,
@@ -360,4 +368,23 @@ func normalizeConfidence(confidence Confidence) Confidence {
 	default:
 		return ConfidenceUnknown
 	}
+}
+
+func higherConfidence(left, right Confidence) Confidence {
+	rank := func(confidence Confidence) int {
+		switch normalizeConfidence(confidence) {
+		case ConfidenceHigh:
+			return 3
+		case ConfidenceMedium:
+			return 2
+		case ConfidenceLow:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(right) > rank(left) {
+		return normalizeConfidence(right)
+	}
+	return normalizeConfidence(left)
 }

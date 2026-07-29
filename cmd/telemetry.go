@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wyx2685/v2node/conf"
@@ -70,7 +71,7 @@ func openTelemetryPipeline(node *conf.NodeConfig) (*telemetry.Pipeline, error) {
 		QueueDirectory:   config.QueueDirectory,
 		QueueMaxBytes:    config.QueueMaxBytes,
 		QueueMaxAge:      time.Duration(config.QueueMaxAgeSeconds) * time.Second,
-		CollectorVersion: version,
+		CollectorVersion: telemetryCollectorVersion(version),
 		BufferSize:       config.BufferSize,
 		FlushInterval:    time.Duration(config.FlushIntervalSeconds) * time.Second,
 		RequestTimeout:   requestTimeout,
@@ -78,4 +79,21 @@ func openTelemetryPipeline(node *conf.NodeConfig) (*telemetry.Pipeline, error) {
 		RetryMax:         time.Duration(config.RetryMaxSeconds) * time.Second,
 		ShutdownTimeout:  time.Duration(config.ShutdownTimeoutSeconds) * time.Second,
 	})
+}
+
+func telemetryCollectorVersion(value string) string {
+	const maximumLength = 32
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	for _, character := range value {
+		if character < 0x21 || character > 0x7e {
+			return "unknown"
+		}
+	}
+	if len(value) > maximumLength {
+		return value[:maximumLength]
+	}
+	return value
 }

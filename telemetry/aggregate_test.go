@@ -96,6 +96,43 @@ func TestAggregatorFoldsUnknownDestinationsWithoutLeakingNames(t *testing.T) {
 	}
 }
 
+func TestAggregatorFoldsConfidenceChangesIntoStableBucket(t *testing.T) {
+	aggregator := newTestAggregator(t)
+	start := time.Date(2026, 7, 29, 2, 30, 0, 0, time.UTC)
+	observation := Observation{
+		ObservedAt:  start.Add(10 * time.Second),
+		UserID:      42,
+		NodeID:      7,
+		SourceIP:    netip.MustParseAddr("1.2.3.4"),
+		Destination: Destination{Address: "one.example.com", Port: 443, Kind: DestinationDomain},
+		Network:     NetworkTCP,
+		AppProtocol: AppProtocolTLS,
+		SniffSource: SniffTLSSNI,
+		Confidence:  ConfidenceLow,
+	}
+	if !aggregator.Observe(observation) {
+		t.Fatal("Observe() rejected low-confidence connection")
+	}
+	observation.ObservedAt = start.Add(20 * time.Second)
+	observation.Destination.Address = "two.example.com"
+	observation.Confidence = ConfidenceHigh
+	if !aggregator.Observe(observation) {
+		t.Fatal("Observe() rejected high-confidence connection")
+	}
+
+	emission := aggregator.FlushBefore(start.Add(time.Minute))
+	if len(emission.Buckets) != 1 {
+		t.Fatalf("buckets = %d, want 1", len(emission.Buckets))
+	}
+	got := emission.Buckets[0]
+	if got.ConnectionCount != 2 || got.UnknownDestinationCount != 2 {
+		t.Fatalf("aggregate measures = %#v", got)
+	}
+	if got.SniffConfidence != ConfidenceHigh {
+		t.Fatalf("sniff confidence = %q, want %q", got.SniffConfidence, ConfidenceHigh)
+	}
+}
+
 func TestAggregatorCountsActualSourceTransitions(t *testing.T) {
 	aggregator := newTestAggregator(t)
 	start := time.Date(2026, 7, 29, 3, 0, 0, 0, time.UTC)

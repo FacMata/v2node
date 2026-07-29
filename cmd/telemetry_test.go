@@ -40,6 +40,19 @@ func TestOpenTelemetryPipelineSkipsUnavailableRoute(t *testing.T) {
 	}
 }
 
+func TestTelemetryCollectorVersionFitsWireContract(t *testing.T) {
+	fullSHA := "696168df492fc0b14c1507956757c8c3d8621376"
+	if got := telemetryCollectorVersion(fullSHA); got != fullSHA[:32] {
+		t.Fatalf("telemetryCollectorVersion() = %q, want %q", got, fullSHA[:32])
+	}
+	if got := telemetryCollectorVersion(" v3.1.9 "); got != "v3.1.9" {
+		t.Fatalf("telemetryCollectorVersion() = %q, want v3.1.9", got)
+	}
+	if got := telemetryCollectorVersion("bad version"); got != "unknown" {
+		t.Fatalf("telemetryCollectorVersion() = %q, want unknown", got)
+	}
+}
+
 func TestNewTelemetryManagerKeepsFirstAvailableDuplicateNode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(
 		w http.ResponseWriter,
