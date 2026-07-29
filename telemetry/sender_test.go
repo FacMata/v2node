@@ -11,23 +11,21 @@ import (
 	"time"
 )
 
-func TestSenderPostsSignedExactBodyWithoutSharedToken(t *testing.T) {
+func TestSenderPostsExactBodyWithServerAPIAuthentication(t *testing.T) {
 	body := []byte(`{"schema_version":1,"batch_id":"019fb0c6-ff80-7b22-9202-b7a6c11a6b88"}`)
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v2/server/telemetry/connection-buckets" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		if r.URL.RawQuery != "" {
-			t.Errorf("query = %q, want empty", r.URL.RawQuery)
+		if r.URL.Query().Get("node_type") != "v2node" ||
+			r.URL.Query().Get("node_id") != "7" ||
+			r.URL.Query().Get("token") != "server-api-key" {
+			t.Errorf("server API query = %q", r.URL.RawQuery)
 		}
-		if r.Header.Get("X-Node-Id") != "7" ||
-			r.Header.Get("X-Telemetry-Key-Id") != "01JTELEMETRYKEY00000000000" {
-			t.Errorf("identity headers = %#v", r.Header)
-		}
-		if r.Header.Get("X-Telemetry-Signature") == "" ||
-			r.Header.Get("X-Telemetry-Nonce") == "" {
-			t.Errorf("signature headers missing: %#v", r.Header)
+		if r.Header.Get("X-Telemetry-Signature") != "" ||
+			r.Header.Get("X-Telemetry-Nonce") != "" {
+			t.Errorf("legacy telemetry signature headers present: %#v", r.Header)
 		}
 		var err error
 		received, err = io.ReadAll(r.Body)
@@ -39,14 +37,12 @@ func TestSenderPostsSignedExactBodyWithoutSharedToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	signer, err := NewSigner(7, "01JTELEMETRYKEY00000000000", []byte("0123456789abcdef0123456789abcdef"))
-	if err != nil {
-		t.Fatalf("NewSigner() error = %v", err)
-	}
 	sender, err := NewSender(SenderConfig{
 		Endpoint: server.URL + "/api/v2/server/telemetry/connection-buckets",
 		Timeout:  time.Second,
-	}, signer)
+		NodeID:   7,
+		APIKey:   "server-api-key",
+	})
 	if err != nil {
 		t.Fatalf("NewSender() error = %v", err)
 	}
@@ -71,8 +67,9 @@ func TestSenderClassifiesRetryableAndPermanentResponses(t *testing.T) {
 		retryable bool
 	}{
 		{name: "rate limited", status: http.StatusTooManyRequests, code: "TELEMETRY_RATE_LIMITED", retryable: true},
+		{name: "route not ready", status: http.StatusNotFound, code: "Not Found", retryable: true},
 		{name: "unavailable", status: http.StatusServiceUnavailable, code: "TELEMETRY_INGEST_UNAVAILABLE", retryable: true},
-		{name: "bad signature", status: http.StatusUnauthorized, code: "TELEMETRY_SIGNATURE_INVALID", retryable: false},
+		{name: "bad server API key", status: http.StatusUnauthorized, code: "TELEMETRY_AUTH_INVALID", retryable: false},
 	}
 
 	for _, tt := range tests {
@@ -83,8 +80,12 @@ func TestSenderClassifiesRetryableAndPermanentResponses(t *testing.T) {
 			}))
 			defer server.Close()
 
-			signer, _ := NewSigner(7, "key", []byte("0123456789abcdef0123456789abcdef"))
-			sender, err := NewSender(SenderConfig{Endpoint: server.URL, Timeout: time.Second}, signer)
+			sender, err := NewSender(SenderConfig{
+				Endpoint: server.URL,
+				Timeout:  time.Second,
+				NodeID:   7,
+				APIKey:   "server-api-key",
+			})
 			if err != nil {
 				t.Fatalf("NewSender() error = %v", err)
 			}
@@ -110,12 +111,41 @@ func TestSenderRejectsMalformedSuccessfulResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	signer, _ := NewSigner(7, "key", []byte("0123456789abcdef0123456789abcdef"))
-	sender, err := NewSender(SenderConfig{Endpoint: server.URL, Timeout: time.Second}, signer)
+	sender, err := NewSender(SenderConfig{
+		Endpoint: server.URL,
+		Timeout:  time.Second,
+		NodeID:   7,
+		APIKey:   "server-api-key",
+	})
 	if err != nil {
 		t.Fatalf("NewSender() error = %v", err)
 	}
 	if _, err := sender.Send(context.Background(), []byte("{}")); err == nil {
 		t.Fatal("Send() accepted malformed success response")
+	}
+}
+
+func TestSenderProbeRequiresAuthenticatedTelemetryRoute(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("token") != "server-api-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"code":"TELEMETRY_INVALID_PAYLOAD"}`)
+	}))
+	defer server.Close()
+
+	sender, err := NewSender(SenderConfig{
+		Endpoint: server.URL,
+		Timeout:  time.Second,
+		NodeID:   7,
+		APIKey:   "server-api-key",
+	})
+	if err != nil {
+		t.Fatalf("NewSender() error = %v", err)
+	}
+	if err := sender.Probe(context.Background()); err != nil {
+		t.Fatalf("Probe() error = %v", err)
 	}
 }

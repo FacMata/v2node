@@ -20,6 +20,7 @@ func TestDiskQueueEncryptsAndSurvivesReopen(t *testing.T) {
 	now := time.Date(2026, 7, 29, 5, 0, 0, 0, time.UTC)
 
 	queue := openTestQueue(t, directory, streamID, key)
+	queue.now = func() time.Time { return now }
 	payload := []byte(`{"secret":"sealed-source-and-telemetry"}`)
 	if err := queue.Enqueue(QueueRecord{
 		ID:            recordID,
@@ -47,6 +48,7 @@ func TestDiskQueueEncryptsAndSurvivesReopen(t *testing.T) {
 	}
 
 	queue = openTestQueue(t, directory, streamID, key)
+	queue.now = func() time.Time { return now }
 	got, err := queue.Peek()
 	if err != nil {
 		t.Fatalf("Peek() error = %v", err)
@@ -84,7 +86,6 @@ func TestDiskQueueRejectsWrongKey(t *testing.T) {
 	if err := queue.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-
 	queue = openTestQueue(t, directory, streamID, bytes.Repeat([]byte{2}, 32))
 	if _, err := queue.Peek(); err == nil {
 		t.Fatal("Peek() error = nil, want authentication failure")

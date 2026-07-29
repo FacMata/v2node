@@ -34,25 +34,21 @@ type NodeConfig struct {
 }
 
 type TelemetryConfig struct {
-	Enabled                   bool   `mapstructure:"Enabled"`
-	Endpoint                  string `mapstructure:"Endpoint"`
-	KeyID                     string `mapstructure:"KeyID"`
-	SecretEnv                 string `mapstructure:"SecretEnv"`
-	SourceSealingPublicKey    string `mapstructure:"SourceSealingPublicKey"`
-	SourceSealingKeyVersion   uint16 `mapstructure:"SourceSealingKeyVersion"`
-	ClassifierCatalogPath     string `mapstructure:"ClassifierCatalogPath"`
-	ClassifierVerificationKey string `mapstructure:"ClassifierVerificationKey"`
-	QueueDirectory            string `mapstructure:"QueueDirectory"`
-	QueueKeyEnv               string `mapstructure:"QueueKeyEnv"`
-	QueueKeyVersion           uint16 `mapstructure:"QueueKeyVersion"`
-	QueueMaxBytes             int64  `mapstructure:"QueueMaxBytes"`
-	QueueMaxAgeSeconds        int    `mapstructure:"QueueMaxAgeSeconds"`
-	BufferSize                int    `mapstructure:"BufferSize"`
-	FlushIntervalSeconds      int    `mapstructure:"FlushIntervalSeconds"`
-	RequestTimeoutSeconds     int    `mapstructure:"RequestTimeoutSeconds"`
-	RetryMinSeconds           int    `mapstructure:"RetryMinSeconds"`
-	RetryMaxSeconds           int    `mapstructure:"RetryMaxSeconds"`
-	ShutdownTimeoutSeconds    int    `mapstructure:"ShutdownTimeoutSeconds"`
+	Enabled                *bool  `mapstructure:"Enabled"`
+	Endpoint               string `mapstructure:"Endpoint"`
+	QueueDirectory         string `mapstructure:"QueueDirectory"`
+	QueueMaxBytes          int64  `mapstructure:"QueueMaxBytes"`
+	QueueMaxAgeSeconds     int    `mapstructure:"QueueMaxAgeSeconds"`
+	BufferSize             int    `mapstructure:"BufferSize"`
+	FlushIntervalSeconds   int    `mapstructure:"FlushIntervalSeconds"`
+	RequestTimeoutSeconds  int    `mapstructure:"RequestTimeoutSeconds"`
+	RetryMinSeconds        int    `mapstructure:"RetryMinSeconds"`
+	RetryMaxSeconds        int    `mapstructure:"RetryMaxSeconds"`
+	ShutdownTimeoutSeconds int    `mapstructure:"ShutdownTimeoutSeconds"`
+}
+
+func (c TelemetryConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 func New() *Conf {
@@ -90,7 +86,7 @@ func (p *Conf) LoadFromPath(filePath string) error {
 
 func applyTelemetryDefaults(node *NodeConfig) {
 	telemetry := &node.Telemetry
-	if !telemetry.Enabled {
+	if !telemetry.IsEnabled() {
 		return
 	}
 	if telemetry.Endpoint == "" {
@@ -102,9 +98,6 @@ func applyTelemetryDefaults(node *NodeConfig) {
 			"/var/lib/v2node/telemetry",
 			fmt.Sprintf("%d", node.NodeID),
 		)
-	}
-	if telemetry.QueueKeyVersion == 0 {
-		telemetry.QueueKeyVersion = 1
 	}
 	if telemetry.QueueMaxBytes == 0 {
 		telemetry.QueueMaxBytes = 256 * 1024 * 1024

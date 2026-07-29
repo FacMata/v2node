@@ -3,13 +3,13 @@ package telemetry
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -18,13 +18,13 @@ const maxTelemetryResponseBytes = 64 * 1024
 type SenderConfig struct {
 	Endpoint string
 	Timeout  time.Duration
+	NodeID   uint64
+	APIKey   string
 }
 
 type Sender struct {
 	endpoint string
 	client   *http.Client
-	signer   *Signer
-	now      func() time.Time
 }
 
 type SendResult struct {
@@ -43,16 +43,16 @@ func (e *SendError) Error() string {
 	return fmt.Sprintf("telemetry send failed: status=%d code=%s", e.StatusCode, e.Code)
 }
 
-func NewSender(config SenderConfig, signer *Signer) (*Sender, error) {
-	if signer == nil {
-		return nil, fmt.Errorf("telemetry signer is required")
+func NewSender(config SenderConfig) (*Sender, error) {
+	if config.NodeID == 0 || config.APIKey == "" {
+		return nil, fmt.Errorf("telemetry server API identity is required")
 	}
 	endpoint, err := url.Parse(config.Endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse telemetry endpoint: %w", err)
 	}
-	if endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return nil, fmt.Errorf("telemetry endpoint cannot contain credentials, query, or fragment")
+	if endpoint.User != nil || endpoint.Fragment != "" {
+		return nil, fmt.Errorf("telemetry endpoint cannot contain credentials or fragment")
 	}
 	if endpoint.Scheme != "https" && !isLoopbackHTTP(endpoint) {
 		return nil, fmt.Errorf("telemetry endpoint requires HTTPS")
@@ -60,34 +60,22 @@ func NewSender(config SenderConfig, signer *Signer) (*Sender, error) {
 	if config.Timeout <= 0 {
 		return nil, fmt.Errorf("telemetry timeout must be positive")
 	}
+	query := endpoint.Query()
+	query.Set("node_type", "v2node")
+	query.Set("node_id", strconv.FormatUint(config.NodeID, 10))
+	query.Set("token", config.APIKey)
+	endpoint.RawQuery = query.Encode()
 	return &Sender{
 		endpoint: endpoint.String(),
 		client:   &http.Client{Timeout: config.Timeout},
-		signer:   signer,
-		now:      time.Now,
 	}, nil
 }
 
 func (s *Sender) Send(ctx context.Context, body []byte) (SendResult, error) {
-	nonce := make([]byte, 24)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return SendResult{}, fmt.Errorf("generate telemetry nonce: %w", err)
-	}
-	headers, err := s.signer.Sign(body, s.now().UTC(), nonce)
-	if err != nil {
-		return SendResult{}, err
-	}
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, bytes.NewReader(body))
+	request, err := s.newRequest(ctx, body)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("create telemetry request: %w", err)
 	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Node-Id", headers.NodeID)
-	request.Header.Set("X-Telemetry-Key-Id", headers.KeyID)
-	request.Header.Set("X-Telemetry-Timestamp", headers.Timestamp)
-	request.Header.Set("X-Telemetry-Nonce", headers.Nonce)
-	request.Header.Set("X-Telemetry-Signature", headers.Signature)
 
 	response, err := s.client.Do(request)
 	if err != nil {
@@ -137,10 +125,62 @@ func (s *Sender) Send(ctx context.Context, body []byte) (SendResult, error) {
 	return SendResult{}, &SendError{
 		StatusCode: response.StatusCode,
 		Code:       code,
-		Retryable: response.StatusCode == http.StatusTooManyRequests ||
+		Retryable: response.StatusCode == http.StatusNotFound ||
+			response.StatusCode == http.StatusTooManyRequests ||
 			response.StatusCode >= http.StatusInternalServerError,
 		RetryAfter: response.Header.Get("Retry-After"),
 	}
+}
+
+func (s *Sender) Probe(ctx context.Context) error {
+	request, err := s.newRequest(ctx, []byte("{}"))
+	if err != nil {
+		return fmt.Errorf("create telemetry probe: %w", err)
+	}
+	response, err := s.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("send telemetry probe: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(
+		response.Body,
+		maxTelemetryResponseBytes+1,
+	))
+	if err != nil {
+		return fmt.Errorf("read telemetry probe response: %w", err)
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if len(responseBody) > 0 {
+		_ = json.Unmarshal(responseBody, &payload)
+	}
+	if response.StatusCode == http.StatusBadRequest &&
+		payload.Code == "TELEMETRY_INVALID_PAYLOAD" {
+		return nil
+	}
+	return fmt.Errorf(
+		"telemetry route unavailable: status=%d code=%s",
+		response.StatusCode,
+		payload.Code,
+	)
+}
+
+func (s *Sender) newRequest(
+	ctx context.Context,
+	body []byte,
+) (*http.Request, error) {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		s.endpoint,
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	return request, nil
 }
 
 func isLoopbackHTTP(endpoint *url.URL) bool {

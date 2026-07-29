@@ -1,7 +1,6 @@
 package telemetry
 
 import (
-	"encoding/base64"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -62,9 +61,8 @@ type Emission struct {
 }
 
 type SourceEnvelope struct {
-	SourceRef         string `json:"source_ref"`
-	SealedIP          string `json:"sealed_ip"`
-	SealingKeyVersion uint16 `json:"sealing_key_version"`
+	SourceRef string `json:"source_ref"`
+	SourceIP  string `json:"source_ip"`
 }
 
 type Bucket struct {
@@ -257,9 +255,8 @@ func (a *Aggregator) FlushBefore(cutoff time.Time) Emission {
 			continue
 		}
 		sources[key.sourceRef] = SourceEnvelope{
-			SourceRef:         key.sourceRef,
-			SealedIP:          base64.RawURLEncoding.EncodeToString(entry.source.SealedIP),
-			SealingKeyVersion: entry.source.SealingKeyVersion,
+			SourceRef: key.sourceRef,
+			SourceIP:  entry.source.IP,
 		}
 		buckets = append(buckets, entry.bucket())
 		delete(a.buckets, key)

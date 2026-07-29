@@ -14,9 +14,8 @@ func TestAssembleBatchAssignsContiguousSequenceAndExactWireShape(t *testing.T) {
 	probe := "cloudflare_one_http"
 	emission := Emission{
 		Sources: []SourceEnvelope{{
-			SourceRef:         "31h2E5m-v7jJ9lJY5fM6yw",
-			SealedIP:          "c2VhbGVk",
-			SealingKeyVersion: 3,
+			SourceRef: "31h2E5m-v7jJ9lJY5fM6yw",
+			SourceIP:  "1.2.3.4",
 		}},
 		Buckets: []Bucket{
 			{
@@ -102,7 +101,7 @@ func TestAssembleBatchAssignsContiguousSequenceAndExactWireShape(t *testing.T) {
 
 func TestAssembleBatchRejectsMixedClassifierVersions(t *testing.T) {
 	emission := Emission{
-		Sources: []SourceEnvelope{{SourceRef: "source"}},
+		Sources: []SourceEnvelope{{SourceRef: "source", SourceIP: "1.2.3.4"}},
 		Buckets: []Bucket{
 			{BucketID: uuid.NewString(), SourceRef: "source", ClassifierVersion: "v1"},
 			{BucketID: uuid.NewString(), SourceRef: "source", ClassifierVersion: "v2"},
@@ -123,7 +122,7 @@ func TestAssembleBatchRejectsMixedClassifierVersions(t *testing.T) {
 }
 
 func TestAssembleBatchEnforcesEnvelopeBounds(t *testing.T) {
-	source := SourceEnvelope{SourceRef: "source"}
+	source := SourceEnvelope{SourceRef: "source", SourceIP: "1.2.3.4"}
 	bucket := Bucket{
 		BucketID:          uuid.NewString(),
 		SourceRef:         source.SourceRef,
@@ -158,7 +157,7 @@ func TestAssembleBatchEnforcesEnvelopeBounds(t *testing.T) {
 	}
 
 	params.SequenceFirst = 1
-	source.SealedIP = strings.Repeat("a", maxBatchJSONBytes)
+	source.SourceIP = strings.Repeat("a", maxBatchJSONBytes)
 	if _, err := AssembleBatch(params, Emission{
 		Sources: []SourceEnvelope{source},
 		Buckets: []Bucket{bucket},

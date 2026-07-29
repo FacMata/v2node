@@ -1,70 +1,62 @@
 package telemetry
 
 import (
+	"crypto/sha256"
 	"path/filepath"
 	"time"
 )
 
 type RuntimeConfig struct {
-	NodeID                  uint64
-	Endpoint                string
-	KeyID                   string
-	Secret                  []byte
-	SourceSealingPublicKey  []byte
-	SourceSealingKeyVersion uint16
-	QueueDirectory          string
-	QueueKey                []byte
-	QueueKeyVersion         uint16
-	QueueMaxBytes           int64
-	QueueMaxAge             time.Duration
-	CollectorVersion        string
-	BufferSize              int
-	FlushInterval           time.Duration
-	RequestTimeout          time.Duration
-	RetryMin                time.Duration
-	RetryMax                time.Duration
-	ShutdownTimeout         time.Duration
+	NodeID           uint64
+	APIKey           string
+	Endpoint         string
+	QueueDirectory   string
+	QueueMaxBytes    int64
+	QueueMaxAge      time.Duration
+	CollectorVersion string
+	BufferSize       int
+	FlushInterval    time.Duration
+	RequestTimeout   time.Duration
+	RetryMin         time.Duration
+	RetryMax         time.Duration
+	ShutdownTimeout  time.Duration
 }
 
-func OpenRuntimePipeline(config RuntimeConfig, catalog Catalog) (*Pipeline, error) {
+func OpenRuntimePipeline(config RuntimeConfig) (*Pipeline, error) {
+	catalog := Catalog{
+		Version:    "builtin-v1",
+		ValidUntil: time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC),
+	}
 	classifier, err := NewClassifier(catalog, time.Now)
 	if err != nil {
 		return nil, err
 	}
-	protector, err := NewSourceProtector(
-		config.KeyID,
-		config.Secret,
-		config.SourceSealingKeyVersion,
-		config.SourceSealingPublicKey,
-	)
-	if err != nil {
-		return nil, err
-	}
+	protector := NewSourceProtector()
 	state, err := openStreamState(config.QueueDirectory, config.NodeID)
 	if err != nil {
 		return nil, err
 	}
+	queueKey := sha256.Sum256(
+		[]byte("v2node-telemetry-queue-v1\x00" + config.APIKey),
+	)
 	queue, err := OpenDiskQueue(QueueConfig{
 		Directory:       filepath.Join(config.QueueDirectory, "queue"),
 		NodeID:          config.NodeID,
 		StreamID:        state.StreamID,
-		WriteKeyVersion: config.QueueKeyVersion,
-		Keys:            map[uint16][]byte{config.QueueKeyVersion: config.QueueKey},
+		WriteKeyVersion: 1,
+		Keys:            map[uint16][]byte{1: queueKey[:]},
 		MaxBytes:        config.QueueMaxBytes,
 		MaxAge:          config.QueueMaxAge,
 	})
 	if err != nil {
 		return nil, err
 	}
-	signer, err := NewSigner(config.NodeID, config.KeyID, config.Secret)
-	if err != nil {
-		_ = queue.Close()
-		return nil, err
-	}
 	sender, err := NewSender(SenderConfig{
 		Endpoint: config.Endpoint,
 		Timeout:  config.RequestTimeout,
-	}, signer)
+		NodeID:   config.NodeID,
+		APIKey:   config.APIKey,
+	})
 	if err != nil {
 		_ = queue.Close()
 		return nil, err

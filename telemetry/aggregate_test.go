@@ -1,15 +1,12 @@
 package telemetry
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/nacl/box"
 )
 
 func TestAggregatorCombinesProbeConnectionsByMinute(t *testing.T) {
@@ -92,7 +89,7 @@ func TestAggregatorFoldsUnknownDestinationsWithoutLeakingNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	for _, forbidden := range []string{"one.example.com", "two.example.com", "1.2.3.4"} {
+	for _, forbidden := range []string{"one.example.com", "two.example.com"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("emission leaked %q: %s", forbidden, encoded)
 		}
@@ -214,18 +211,5 @@ func newTestAggregator(t *testing.T) *Aggregator {
 	if err != nil {
 		t.Fatalf("NewClassifier() error = %v", err)
 	}
-	publicKey, _, err := box.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
-	protector, err := NewSourceProtector(
-		"01JTELEMETRYKEY00000000000",
-		[]byte("0123456789abcdef0123456789abcdef"),
-		3,
-		publicKey[:],
-	)
-	if err != nil {
-		t.Fatalf("NewSourceProtector() error = %v", err)
-	}
-	return NewAggregator(classifier, protector)
+	return NewAggregator(classifier, NewSourceProtector())
 }

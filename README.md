@@ -19,9 +19,9 @@ GOEXPERIMENT=jsonv2 go build -v -o build_assets/v2node -trimpath -ldflags "-X 'g
 
 ## 连接遥测
 
-连接遥测默认关闭。部署字段、密钥环境变量与签名分类目录格式见
-[`docs/telemetry.md`](docs/telemetry.md)。遥测配置或密钥无效时只禁用对应
-节点的遥测，不影响代理转发。
+连接遥测默认启用，复用现有 Server API `NodeID + ApiKey` 并只通过 HTTPS
+发送。可选配置与 fail-open 行为见 [`docs/telemetry.md`](docs/telemetry.md)。
+遥测不可用不影响代理转发。
 
 ## Stars 增长记录
 

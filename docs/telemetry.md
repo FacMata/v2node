@@ -1,8 +1,28 @@
 # Connection telemetry
 
-Telemetry is disabled by default and is configured independently for each
-entry in `Nodes`. Secrets are referenced by environment-variable name and
-must not be written into `config.json`.
+Connection telemetry is enabled by default for every `Nodes` entry. It reuses
+the existing Server API identity:
+
+- `node_type=v2node`
+- `node_id=<NodeID>`
+- `token=<ApiKey>`
+
+The sender accepts HTTPS endpoints only, except loopback HTTP in tests. No
+telemetry-specific key, signature, nonce, source-sealing key, catalog key, or
+environment secret is required.
+
+At startup and config reload, v2node probes the endpoint with the same Server
+API identity. Telemetry starts only when the authenticated route responds with
+the expected invalid-payload code. Missing routes and authentication failures
+are skipped without affecting node startup.
+
+When `Telemetry.Endpoint` is omitted, v2node uses:
+
+```text
+<ApiHost>/api/v2/server/telemetry/connection-buckets
+```
+
+Optional configuration:
 
 ```json
 {
@@ -14,55 +34,33 @@ must not be written into `config.json`.
       "Telemetry": {
         "Enabled": true,
         "Endpoint": "https://panel.example.com/api/v2/server/telemetry/connection-buckets",
-        "KeyID": "01JTELEMETRYKEY00000000000",
-        "SecretEnv": "V2NODE_TELEMETRY_SECRET_123",
-        "SourceSealingPublicKey": "base64url-32-byte-x25519-public-key",
-        "SourceSealingKeyVersion": 1,
-        "ClassifierCatalogPath": "/etc/v2node/telemetry-catalog.json",
-        "ClassifierVerificationKey": "base64url-32-byte-ed25519-public-key",
-        "QueueDirectory": "/var/lib/v2node/telemetry/123",
-        "QueueKeyEnv": "V2NODE_TELEMETRY_QUEUE_KEY_123",
-        "QueueKeyVersion": 1
+        "QueueDirectory": "/var/lib/v2node/telemetry/123"
       }
     }
   ]
 }
 ```
 
-Both secret environment variables contain unpadded base64url:
+Set `Telemetry.Enabled` to `false` for an explicit per-node opt-out. Missing
+`Telemetry` configuration means enabled.
 
-- `SecretEnv`: at least 32 random bytes, issued for this node/key ID only;
-- `QueueKeyEnv`: exactly 32 random bytes for local XChaCha20-Poly1305 records.
+Source IP is sent as canonical plaintext inside the HTTPS JSON request.
+FMPanel converts it to central HMAC and anonymous prefix before ClickHouse
+publication. Unknown destination names, URL paths, query strings, payloads,
+and full browsing logs never leave v2node.
 
-The catalog file is an envelope:
+The local bounded queue, retry backoff, durable batch ID, bucket ID, stream ID,
+and sequence behavior remain fail-open. Once startup probing succeeds, a later
+missing route (`404`), rate limit, or server failure keeps the batch queued and
+retries. Authentication failures disable delivery for that batch without
+affecting proxy forwarding.
 
-```json
-{
-  "catalog": {
-    "version": "2026-07-29.1",
-    "valid_until": "2026-08-05T00:00:00Z",
-    "rules": [
-      {
-        "id": "cloudflare_one_http",
-        "host": "1.1.1.1",
-        "match_suffix": false,
-        "ports": [80],
-        "protocols": ["http"],
-        "confidence": "high",
-        "enabled": true
-      }
-    ]
-  },
-  "signature": "base64url-ed25519-signature"
-}
-```
+Queue files use owner-only permissions and XChaCha20-Poly1305. The queue key is
+derived from the current Server API key, so there is no separately provisioned
+secret. Server API key rotation intentionally invalidates old queued batches;
+all affected node entries must be reconfigured together.
 
-The Ed25519 signature covers the exact raw JSON bytes used as the value of
-`catalog`. Catalog hosts must already be canonical lowercase ASCII. An invalid
-or expired catalog never blocks forwarding; an expired catalog classifies
-destinations as `unknown`.
-
-Optional bounds use these defaults:
+Default bounds:
 
 | Field | Default |
 |---|---:|
@@ -74,7 +72,5 @@ Optional bounds use these defaults:
 | `RetryMinSeconds` / `RetryMaxSeconds` | 1 / 60 |
 | `ShutdownTimeoutSeconds` | 5 |
 
-Core/config reload keeps the existing telemetry manager, encrypted queue,
-stream ID and sender alive, then rebinds the new dispatcher. Changes to
-telemetry keys, catalog paths or queue settings therefore require a process
-restart.
+Config reload rebuilds telemetry managers and applies endpoint or queue-setting
+changes. Telemetry failure never blocks node startup, reload, or forwarding.

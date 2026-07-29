@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/netip"
 	"time"
 
 	"github.com/google/uuid"
@@ -98,6 +99,9 @@ func AssembleBatch(params BatchParams, emission Emission) (Batch, error) {
 	for _, source := range emission.Sources {
 		if source.SourceRef == "" {
 			return Batch{}, fmt.Errorf("source ref is required")
+		}
+		if _, err := netip.ParseAddr(source.SourceIP); err != nil {
+			return Batch{}, fmt.Errorf("source IP is invalid")
 		}
 		if _, exists := sourceRefs[source.SourceRef]; exists {
 			return Batch{}, fmt.Errorf("duplicate source ref %s", source.SourceRef)

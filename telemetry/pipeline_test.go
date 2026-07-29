@@ -3,7 +3,6 @@ package telemetry
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/nacl/box"
 )
 
 func TestPipelineQueuesSendsAndAcknowledgesBatch(t *testing.T) {
@@ -103,16 +101,7 @@ func newTestPipeline(t *testing.T, directory, endpoint string) *Pipeline {
 	if err != nil {
 		t.Fatalf("NewClassifier() error = %v", err)
 	}
-	publicKey, _, err := box.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey() error = %v", err)
-	}
-	secret := bytes.Repeat([]byte{1}, 32)
-	protector, err := NewSourceProtector("test-key", secret, 1, publicKey[:])
-	if err != nil {
-		t.Fatalf("NewSourceProtector() error = %v", err)
-	}
-	aggregator := NewAggregator(classifier, protector)
+	aggregator := NewAggregator(classifier, NewSourceProtector())
 	state, err := openStreamState(directory, 7)
 	if err != nil {
 		t.Fatalf("openStreamState() error = %v", err)
@@ -129,11 +118,12 @@ func newTestPipeline(t *testing.T, directory, endpoint string) *Pipeline {
 	if err != nil {
 		t.Fatalf("OpenDiskQueue() error = %v", err)
 	}
-	signer, err := NewSigner(7, "test-key", secret)
-	if err != nil {
-		t.Fatalf("NewSigner() error = %v", err)
-	}
-	sender, err := NewSender(SenderConfig{Endpoint: endpoint, Timeout: time.Second}, signer)
+	sender, err := NewSender(SenderConfig{
+		Endpoint: endpoint,
+		Timeout:  time.Second,
+		NodeID:   7,
+		APIKey:   "server-api-key",
+	})
 	if err != nil {
 		t.Fatalf("NewSender() error = %v", err)
 	}
@@ -174,9 +164,8 @@ func TestPipelineKeepsQueuedBatchWhenStatePersistFails(t *testing.T) {
 
 	emission := Emission{
 		Sources: []SourceEnvelope{{
-			SourceRef:         "source",
-			SealedIP:          "sealed",
-			SealingKeyVersion: 1,
+			SourceRef: "source",
+			SourceIP:  "1.2.3.4",
 		}},
 		Buckets: []Bucket{{
 			BucketID:          uuid.NewString(),
