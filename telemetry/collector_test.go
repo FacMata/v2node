@@ -13,7 +13,7 @@ func TestCollectorObserveNeverBlocksWhenBufferIsFull(t *testing.T) {
 	collector, err := NewCollector(CollectorConfig{
 		BufferSize:    1,
 		FlushInterval: time.Minute,
-	}, newTestAggregator(t), func(Emission) error { return nil })
+	}, NewEventBuffer(NewSourceProtector()), func(Emission) error { return nil })
 	if err != nil {
 		t.Fatalf("NewCollector() error = %v", err)
 	}
@@ -27,12 +27,12 @@ func TestCollectorObserveNeverBlocksWhenBufferIsFull(t *testing.T) {
 	}
 }
 
-func TestCollectorFlushesCompletedMinuteOffHotPath(t *testing.T) {
+func TestCollectorFlushesRawEventsOffHotPath(t *testing.T) {
 	emissions := make(chan Emission, 1)
 	collector, err := NewCollector(CollectorConfig{
 		BufferSize:    8,
 		FlushInterval: 5 * time.Millisecond,
-	}, newTestAggregator(t), func(emission Emission) error {
+	}, NewEventBuffer(NewSourceProtector()), func(emission Emission) error {
 		emissions <- emission
 		return nil
 	})
@@ -50,8 +50,8 @@ func TestCollectorFlushesCompletedMinuteOffHotPath(t *testing.T) {
 
 	select {
 	case emission := <-emissions:
-		if len(emission.Buckets) != 1 {
-			t.Fatalf("emission buckets = %d", len(emission.Buckets))
+		if len(emission.Events) != 1 {
+			t.Fatalf("emission events = %d", len(emission.Events))
 		}
 	case <-time.After(time.Second):
 		t.Fatal("collector did not flush")
@@ -64,7 +64,7 @@ func TestCollectorRetriesEmissionAfterEmitterFailure(t *testing.T) {
 	collector, err := NewCollector(CollectorConfig{
 		BufferSize:    8,
 		FlushInterval: 5 * time.Millisecond,
-	}, newTestAggregator(t), func(emission Emission) error {
+	}, NewEventBuffer(NewSourceProtector()), func(emission Emission) error {
 		if attempts.Add(1) == 1 {
 			return errors.New("queue unavailable")
 		}
@@ -82,8 +82,8 @@ func TestCollectorRetriesEmissionAfterEmitterFailure(t *testing.T) {
 	}
 	select {
 	case emission := <-emissions:
-		if len(emission.Buckets) != 1 {
-			t.Fatalf("emission buckets = %d", len(emission.Buckets))
+		if len(emission.Events) != 1 {
+			t.Fatalf("emission events = %d", len(emission.Events))
 		}
 	case <-time.After(time.Second):
 		t.Fatal("collector did not retry failed emission")
@@ -97,7 +97,7 @@ func TestCollectorCannotStartOrObserveAfterClose(t *testing.T) {
 	collector, err := NewCollector(CollectorConfig{
 		BufferSize:    1,
 		FlushInterval: time.Minute,
-	}, newTestAggregator(t), func(Emission) error { return nil })
+	}, NewEventBuffer(NewSourceProtector()), func(Emission) error { return nil })
 	if err != nil {
 		t.Fatalf("NewCollector() error = %v", err)
 	}

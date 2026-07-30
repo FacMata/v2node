@@ -11,21 +11,22 @@ import (
 )
 
 const (
-	maxBucketsPerBatch = 1000
+	maxEventsPerBatch  = 1000
 	maxSourcesPerBatch = 256
 	maxBatchJSONBytes  = 512 * 1024
 )
 
+var eventNamespace = uuid.MustParse("1527fc78-b14e-46d6-9c2e-4e680e22abf8")
+
 type BatchParams struct {
-	SchemaVersion     uint16
-	BatchID           uuid.UUID
-	NodeID            uint64
-	StreamID          uuid.UUID
-	GeneratedAt       time.Time
-	CollectorVersion  string
-	ClassifierVersion string
-	SequenceFirst     uint64
-	DroppedCount      uint64
+	SchemaVersion    uint16
+	BatchID          uuid.UUID
+	NodeID           uint64
+	StreamID         uuid.UUID
+	GeneratedAt      time.Time
+	CollectorVersion string
+	SequenceFirst    uint64
+	DroppedCount     uint64
 }
 
 type Batch struct {
@@ -35,35 +36,30 @@ type Batch struct {
 	StreamID                       string           `json:"stream_id"`
 	GeneratedAt                    MillisTime       `json:"generated_at"`
 	CollectorVersion               string           `json:"collector_version"`
-	ClassifierVersion              string           `json:"classifier_version"`
 	SequenceFirst                  uint64           `json:"sequence_first"`
 	SequenceLast                   uint64           `json:"sequence_last"`
 	DroppedCountSincePreviousBatch uint64           `json:"dropped_count_since_previous_batch"`
 	Sources                        []SourceEnvelope `json:"sources"`
-	Buckets                        []WireBucket     `json:"buckets"`
+	Events                         []WireEvent      `json:"events"`
 }
 
-type WireBucket struct {
-	BucketID                string           `json:"bucket_id"`
-	Sequence                uint64           `json:"sequence"`
-	BucketStart             MillisTime       `json:"bucket_start"`
-	UserID                  uint64           `json:"user_id"`
-	SourceRef               string           `json:"source_ref"`
-	DestinationClass        DestinationClass `json:"destination_class"`
-	ProbeSignature          *string          `json:"probe_signature"`
-	ProbeConfidence         Confidence       `json:"probe_confidence"`
-	DestinationKind         DestinationKind  `json:"destination_kind"`
-	DestinationPort         uint16           `json:"destination_port"`
-	UnknownDestinationCount uint32           `json:"unknown_destination_count"`
-	Network                 Network          `json:"network"`
-	AppProtocol             AppProtocol      `json:"app_protocol"`
-	SniffSource             SniffSource      `json:"sniff_source"`
-	SniffConfidence         Confidence       `json:"sniff_confidence"`
-	ConnectionCount         uint32           `json:"connection_count"`
-	UploadBytes             uint64           `json:"upload_bytes"`
-	DownloadBytes           uint64           `json:"download_bytes"`
-	ActiveMilliseconds      uint64           `json:"active_milliseconds"`
-	TransitionInCount       uint32           `json:"transition_in_count"`
+type WireEvent struct {
+	EventID            uuid.UUID       `json:"event_id"`
+	Sequence           uint64          `json:"sequence"`
+	ObservedAt         MillisTime      `json:"observed_at"`
+	UserID             uint64          `json:"user_id"`
+	SourceRef          string          `json:"source_ref"`
+	DestinationAddress string          `json:"destination_address"`
+	DestinationKind    DestinationKind `json:"destination_kind"`
+	DestinationPort    uint16          `json:"destination_port"`
+	Network            Network         `json:"network"`
+	AppProtocol        AppProtocol     `json:"app_protocol"`
+	SniffSource        SniffSource     `json:"sniff_source"`
+	SniffConfidence    Confidence      `json:"sniff_confidence"`
+	UploadBytes        uint64          `json:"upload_bytes"`
+	DownloadBytes      uint64          `json:"download_bytes"`
+	ActiveMilliseconds uint64          `json:"active_milliseconds"`
+	ObservationKind    ObservationKind `json:"observation_kind"`
 }
 
 func AssembleBatch(params BatchParams, emission Emission) (Batch, error) {
@@ -79,19 +75,19 @@ func AssembleBatch(params BatchParams, emission Emission) (Batch, error) {
 	if params.GeneratedAt.IsZero() {
 		return Batch{}, fmt.Errorf("generated timestamp is required")
 	}
-	if params.CollectorVersion == "" || params.ClassifierVersion == "" {
-		return Batch{}, fmt.Errorf("collector and classifier versions are required")
+	if params.CollectorVersion == "" {
+		return Batch{}, fmt.Errorf("collector version is required")
 	}
-	if len(emission.Buckets) == 0 {
-		return Batch{}, fmt.Errorf("telemetry batch must contain buckets")
+	if len(emission.Events) == 0 {
+		return Batch{}, fmt.Errorf("telemetry batch must contain events")
 	}
-	if len(emission.Buckets) > maxBucketsPerBatch {
-		return Batch{}, fmt.Errorf("telemetry batch exceeds %d buckets", maxBucketsPerBatch)
+	if len(emission.Events) > maxEventsPerBatch {
+		return Batch{}, fmt.Errorf("telemetry batch exceeds %d events", maxEventsPerBatch)
 	}
 	if len(emission.Sources) == 0 || len(emission.Sources) > maxSourcesPerBatch {
 		return Batch{}, fmt.Errorf("telemetry batch source count is out of bounds")
 	}
-	if uint64(len(emission.Buckets)-1) > math.MaxUint64-params.SequenceFirst {
+	if uint64(len(emission.Events)-1) > math.MaxUint64-params.SequenceFirst {
 		return Batch{}, fmt.Errorf("telemetry sequence range overflows")
 	}
 
@@ -109,57 +105,43 @@ func AssembleBatch(params BatchParams, emission Emission) (Batch, error) {
 		sourceRefs[source.SourceRef] = struct{}{}
 	}
 
-	wireBuckets := make([]WireBucket, 0, len(emission.Buckets))
+	wireEvents := make([]WireEvent, 0, len(emission.Events))
 	usedSources := make(map[string]struct{}, len(emission.Sources))
-	for i, bucket := range emission.Buckets {
-		if bucket.ClassifierVersion != params.ClassifierVersion {
-			return Batch{}, fmt.Errorf(
-				"bucket classifier version %q does not match batch %q",
-				bucket.ClassifierVersion,
-				params.ClassifierVersion,
-			)
+	for i, event := range emission.Events {
+		if event.ObservedAt.IsZero() || event.UserID == 0 {
+			return Batch{}, fmt.Errorf("event timestamp and user ID are required")
 		}
-		if _, exists := sourceRefs[bucket.SourceRef]; !exists {
-			return Batch{}, fmt.Errorf("bucket references unknown source %s", bucket.SourceRef)
+		if _, exists := sourceRefs[event.SourceRef]; !exists {
+			return Batch{}, fmt.Errorf("event references unknown source %s", event.SourceRef)
 		}
-		usedSources[bucket.SourceRef] = struct{}{}
-
-		var signature *string
-		if bucket.DestinationClass == DestinationProbe {
-			if bucket.ProbeSignature == "" {
-				return Batch{}, fmt.Errorf("probe bucket signature is required")
-			}
-			value := bucket.ProbeSignature
-			signature = &value
+		if event.DestinationAddress == "" {
+			return Batch{}, fmt.Errorf("event destination is required")
 		}
-		wireBuckets = append(wireBuckets, WireBucket{
-			BucketID:                bucket.BucketID,
-			Sequence:                params.SequenceFirst + uint64(i),
-			BucketStart:             bucket.BucketStart,
-			UserID:                  bucket.UserID,
-			SourceRef:               bucket.SourceRef,
-			DestinationClass:        bucket.DestinationClass,
-			ProbeSignature:          signature,
-			ProbeConfidence:         normalizeConfidence(bucket.ProbeConfidence),
-			DestinationKind:         bucket.DestinationKind,
-			DestinationPort:         bucket.DestinationPort,
-			UnknownDestinationCount: bucket.UnknownDestinationCount,
-			Network:                 normalizeNetwork(bucket.Network),
-			AppProtocol:             normalizeAppProtocol(bucket.AppProtocol),
-			SniffSource:             normalizeSniffSource(bucket.SniffSource),
-			SniffConfidence:         normalizeConfidence(bucket.SniffConfidence),
-			ConnectionCount:         bucket.ConnectionCount,
-			UploadBytes:             bucket.UploadBytes,
-			DownloadBytes:           bucket.DownloadBytes,
-			ActiveMilliseconds:      bucket.ActiveMilliseconds,
-			TransitionInCount:       bucket.TransitionInCount,
+		sequence := params.SequenceFirst + uint64(i)
+		usedSources[event.SourceRef] = struct{}{}
+		wireEvents = append(wireEvents, WireEvent{
+			EventID:            uuid.NewSHA1(eventNamespace, []byte(params.StreamID.String()+"|"+fmt.Sprint(sequence))),
+			Sequence:           sequence,
+			ObservedAt:         MillisTime{Time: event.ObservedAt.UTC()},
+			UserID:             event.UserID,
+			SourceRef:          event.SourceRef,
+			DestinationAddress: event.DestinationAddress,
+			DestinationKind:    event.DestinationKind,
+			DestinationPort:    event.DestinationPort,
+			Network:            normalizeNetwork(event.Network),
+			AppProtocol:        normalizeAppProtocol(event.AppProtocol),
+			SniffSource:        normalizeSniffSource(event.SniffSource),
+			SniffConfidence:    normalizeConfidence(event.SniffConfidence),
+			UploadBytes:        event.UploadBytes,
+			DownloadBytes:      event.DownloadBytes,
+			ActiveMilliseconds: event.ActiveMilliseconds,
+			ObservationKind:    event.ObservationKind,
 		})
 	}
 	if len(usedSources) != len(sourceRefs) {
 		return Batch{}, fmt.Errorf("telemetry batch contains unused source")
 	}
 
-	sequenceLast := params.SequenceFirst + uint64(len(wireBuckets)) - 1
 	batch := Batch{
 		SchemaVersion:                  params.SchemaVersion,
 		BatchID:                        params.BatchID.String(),
@@ -167,12 +149,11 @@ func AssembleBatch(params BatchParams, emission Emission) (Batch, error) {
 		StreamID:                       params.StreamID.String(),
 		GeneratedAt:                    MillisTime{Time: params.GeneratedAt.UTC()},
 		CollectorVersion:               params.CollectorVersion,
-		ClassifierVersion:              params.ClassifierVersion,
 		SequenceFirst:                  params.SequenceFirst,
-		SequenceLast:                   sequenceLast,
+		SequenceLast:                   params.SequenceFirst + uint64(len(wireEvents)) - 1,
 		DroppedCountSincePreviousBatch: params.DroppedCount,
 		Sources:                        append([]SourceEnvelope(nil), emission.Sources...),
-		Buckets:                        wireBuckets,
+		Events:                         wireEvents,
 	}
 	encoded, err := json.Marshal(batch)
 	if err != nil {

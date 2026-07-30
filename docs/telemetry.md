@@ -44,12 +44,14 @@ Optional configuration:
 Set `Telemetry.Enabled` to `false` for an explicit per-node opt-out. Missing
 `Telemetry` configuration means enabled.
 
-Source IP is sent as canonical plaintext inside the HTTPS JSON request.
-FMPanel converts it to central HMAC and anonymous prefix before ClickHouse
-publication. Unknown destination names, URL paths, query strings, payloads,
-and full browsing logs never leave v2node.
+Each logical dispatch is reported as one raw event. Source IP and normalized
+destination address are sent as canonical plaintext inside the HTTPS JSON
+request. Events are buffered and uploaded every 5 seconds by default. v2node
+does not classify probes or aggregate minute buckets; FMPanel owns both
+operations. URL paths, query strings, payloads, DNS message bodies, process
+names, and application package names are not collected.
 
-The local bounded queue, retry backoff, durable batch ID, bucket ID, stream ID,
+The local bounded queue, retry backoff, durable batch ID, event ID, stream ID,
 and sequence behavior remain fail-open. Once startup probing succeeds, a later
 missing route (`404`), rate limit, or server failure keeps the batch queued and
 retries. Authentication failures disable delivery for that batch without

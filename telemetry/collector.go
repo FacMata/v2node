@@ -18,8 +18,11 @@ type CollectorConfig struct {
 }
 
 type Collector struct {
-	config     CollectorConfig
-	aggregator *Aggregator
+	config CollectorConfig
+	buffer interface {
+		Observe(Observation) bool
+		Flush() Emission
+	}
 	emit       func(Emission) error
 	input      chan Observation
 	stop       chan struct{}
@@ -35,7 +38,10 @@ type Collector struct {
 
 func NewCollector(
 	config CollectorConfig,
-	aggregator *Aggregator,
+	buffer interface {
+		Observe(Observation) bool
+		Flush() Emission
+	},
 	emit func(Emission) error,
 ) (*Collector, error) {
 	if config.BufferSize <= 0 {
@@ -44,16 +50,16 @@ func NewCollector(
 	if config.FlushInterval <= 0 {
 		return nil, fmt.Errorf("collector flush interval must be positive")
 	}
-	if aggregator == nil || emit == nil {
-		return nil, fmt.Errorf("collector aggregator and emitter are required")
+	if buffer == nil || emit == nil {
+		return nil, fmt.Errorf("collector buffer and emitter are required")
 	}
 	return &Collector{
-		config:     config,
-		aggregator: aggregator,
-		emit:       emit,
-		input:      make(chan Observation, config.BufferSize),
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
+		config: config,
+		buffer: buffer,
+		emit:   emit,
+		input:  make(chan Observation, config.BufferSize),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
 	}, nil
 }
 
@@ -114,11 +120,12 @@ func (c *Collector) run(ctx context.Context) {
 	for {
 		select {
 		case observation := <-c.input:
-			if !c.aggregator.Observe(observation) {
+			if !c.buffer.Observe(observation) {
 				c.dropped.Add(1)
 			}
 		case <-ticker.C:
-			_ = c.flush(time.Now().UTC().Truncate(time.Minute))
+			for c.flush() {
+			}
 		case <-ctx.Done():
 			c.drainAndFlush()
 			return
@@ -133,22 +140,22 @@ func (c *Collector) drainAndFlush() {
 	for {
 		select {
 		case observation := <-c.input:
-			if !c.aggregator.Observe(observation) {
+			if !c.buffer.Observe(observation) {
 				c.dropped.Add(1)
 			}
 		default:
-			for c.flush(time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)) {
+			for c.flush() {
 			}
 			return
 		}
 	}
 }
 
-func (c *Collector) flush(cutoff time.Time) bool {
-	if len(c.pending.Buckets) == 0 {
-		c.pending = c.aggregator.FlushBefore(cutoff)
+func (c *Collector) flush() bool {
+	if len(c.pending.Events) == 0 {
+		c.pending = c.buffer.Flush()
 	}
-	if len(c.pending.Buckets) == 0 {
+	if len(c.pending.Events) == 0 {
 		return false
 	}
 	if err := c.emit(c.pending); err != nil {

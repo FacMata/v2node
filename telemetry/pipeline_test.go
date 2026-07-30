@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 func TestPipelineQueuesSendsAndAcknowledgesBatch(t *testing.T) {
@@ -31,7 +29,7 @@ func TestPipelineQueuesSendsAndAcknowledgesBatch(t *testing.T) {
 		received <- batch
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
-				"accepted":  len(batch.Buckets),
+				"accepted":  len(batch.Events),
 				"duplicate": false,
 			},
 		})
@@ -55,7 +53,7 @@ func TestPipelineQueuesSendsAndAcknowledgesBatch(t *testing.T) {
 
 	select {
 	case batch := <-received:
-		if batch.NodeID != 7 || len(batch.Buckets) != 1 || batch.SequenceFirst != 1 {
+		if batch.NodeID != 7 || len(batch.Events) != 1 || batch.SequenceFirst != 1 {
 			t.Fatalf("batch = %#v", batch)
 		}
 	case <-time.After(2 * time.Second):
@@ -86,22 +84,6 @@ func TestPipelineQueuesSendsAndAcknowledgesBatch(t *testing.T) {
 
 func newTestPipeline(t *testing.T, directory, endpoint string) *Pipeline {
 	t.Helper()
-	now := time.Now().UTC()
-	classifier, err := NewClassifier(Catalog{
-		Version:    "test-v1",
-		ValidUntil: now.Add(time.Hour),
-		Rules: []ProbeRule{{
-			ID:         "cloudflare_one_http",
-			Host:       "1.1.1.1",
-			Ports:      []uint16{80},
-			Protocols:  []AppProtocol{AppProtocolHTTP},
-			Confidence: ConfidenceHigh,
-		}},
-	}, time.Now)
-	if err != nil {
-		t.Fatalf("NewClassifier() error = %v", err)
-	}
-	aggregator := NewAggregator(classifier, NewSourceProtector())
 	state, err := openStreamState(directory, 7)
 	if err != nil {
 		t.Fatalf("openStreamState() error = %v", err)
@@ -128,16 +110,15 @@ func newTestPipeline(t *testing.T, directory, endpoint string) *Pipeline {
 		t.Fatalf("NewSender() error = %v", err)
 	}
 	pipeline, err := NewPipeline(PipelineConfig{
-		NodeID:            7,
-		CollectorVersion:  "test",
-		ClassifierVersion: "test-v1",
-		StateDirectory:    directory,
-		BufferSize:        16,
-		FlushInterval:     5 * time.Millisecond,
-		RetryMin:          5 * time.Millisecond,
-		RetryMax:          20 * time.Millisecond,
-		ShutdownTimeout:   100 * time.Millisecond,
-	}, aggregator, queue, sender)
+		NodeID:           7,
+		CollectorVersion: "test",
+		StateDirectory:   directory,
+		BufferSize:       16,
+		FlushInterval:    5 * time.Millisecond,
+		RetryMin:         5 * time.Millisecond,
+		RetryMax:         20 * time.Millisecond,
+		ShutdownTimeout:  100 * time.Millisecond,
+	}, NewEventBuffer(NewSourceProtector()), queue, sender)
 	if err != nil {
 		t.Fatalf("NewPipeline() error = %v", err)
 	}
@@ -167,14 +148,16 @@ func TestPipelineKeepsQueuedBatchWhenStatePersistFails(t *testing.T) {
 			SourceRef: "source",
 			SourceIP:  "1.2.3.4",
 		}},
-		Buckets: []Bucket{{
-			BucketID:          uuid.NewString(),
-			BucketStart:       MillisTime{Time: time.Now().UTC().Truncate(time.Minute)},
-			UserID:            42,
-			SourceRef:         "source",
-			DestinationClass:  DestinationOther,
-			ConnectionCount:   1,
-			ClassifierVersion: "test-v1",
+		Events: []ConnectionEvent{{
+			ObservedAt:         time.Now().UTC(),
+			UserID:             42,
+			SourceRef:          "source",
+			DestinationAddress: "example.com",
+			DestinationKind:    DestinationDomain,
+			DestinationPort:    443,
+			Network:            NetworkTCP,
+			AppProtocol:        AppProtocolTLS,
+			ObservationKind:    ObservationKindDispatch,
 		}},
 	}
 	if err := pipeline.enqueueEmission(emission); err != nil {

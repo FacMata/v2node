@@ -16,15 +16,14 @@ import (
 )
 
 type PipelineConfig struct {
-	NodeID            uint64
-	CollectorVersion  string
-	ClassifierVersion string
-	StateDirectory    string
-	BufferSize        int
-	FlushInterval     time.Duration
-	RetryMin          time.Duration
-	RetryMax          time.Duration
-	ShutdownTimeout   time.Duration
+	NodeID           uint64
+	CollectorVersion string
+	StateDirectory   string
+	BufferSize       int
+	FlushInterval    time.Duration
+	RetryMin         time.Duration
+	RetryMax         time.Duration
+	ShutdownTimeout  time.Duration
 }
 
 type Pipeline struct {
@@ -46,13 +45,12 @@ type Pipeline struct {
 
 func NewPipeline(
 	config PipelineConfig,
-	aggregator *Aggregator,
+	buffer *EventBuffer,
 	queue *DiskQueue,
 	sender *Sender,
 ) (*Pipeline, error) {
 	if config.NodeID == 0 ||
 		config.CollectorVersion == "" ||
-		config.ClassifierVersion == "" ||
 		config.StateDirectory == "" {
 		return nil, fmt.Errorf("pipeline identity and state directory are required")
 	}
@@ -61,7 +59,7 @@ func NewPipeline(
 		config.ShutdownTimeout <= 0 {
 		return nil, fmt.Errorf("pipeline timing and buffer bounds are invalid")
 	}
-	if aggregator == nil || queue == nil || sender == nil {
+	if buffer == nil || queue == nil || sender == nil {
 		return nil, fmt.Errorf("pipeline dependencies are required")
 	}
 	if queue.config.NodeID != config.NodeID {
@@ -93,7 +91,7 @@ func NewPipeline(
 	collector, err := NewCollector(CollectorConfig{
 		BufferSize:    config.BufferSize,
 		FlushInterval: config.FlushInterval,
-	}, aggregator, pipeline.enqueueEmission)
+	}, buffer, pipeline.enqueueEmission)
 	if err != nil {
 		return nil, err
 	}
@@ -162,23 +160,22 @@ func (p *Pipeline) enqueueEmission(emission Emission) error {
 		p.queue.TakeDroppedCount() +
 		p.collector.dropped.Swap(0)
 	batch, err := AssembleBatch(BatchParams{
-		SchemaVersion:     1,
-		BatchID:           batchID,
-		NodeID:            p.config.NodeID,
-		StreamID:          streamID,
-		GeneratedAt:       time.Now().UTC(),
-		CollectorVersion:  p.config.CollectorVersion,
-		ClassifierVersion: p.config.ClassifierVersion,
-		SequenceFirst:     sequenceFirst,
-		DroppedCount:      dropped,
+		SchemaVersion:    1,
+		BatchID:          batchID,
+		NodeID:           p.config.NodeID,
+		StreamID:         streamID,
+		GeneratedAt:      time.Now().UTC(),
+		CollectorVersion: p.config.CollectorVersion,
+		SequenceFirst:    sequenceFirst,
+		DroppedCount:     dropped,
 	}, emission)
 	if err != nil {
-		p.pendingDropped.Add(dropped + uint64(len(emission.Buckets)))
+		p.pendingDropped.Add(dropped + uint64(len(emission.Events)))
 		return err
 	}
 	body, err := json.Marshal(batch)
 	if err != nil {
-		p.pendingDropped.Add(dropped + uint64(len(emission.Buckets)))
+		p.pendingDropped.Add(dropped + uint64(len(emission.Events)))
 		return fmt.Errorf("marshal telemetry batch: %w", err)
 	}
 	if err := p.queue.Enqueue(QueueRecord{
@@ -242,11 +239,11 @@ func (p *Pipeline) runSender(ctx context.Context) {
 		}
 		result, sendErr := p.sender.Send(ctx, record.Payload)
 		if sendErr == nil {
-			if !result.Duplicate && result.Accepted != uint32(len(batch.Buckets)) {
+			if !result.Duplicate && result.Accepted != uint32(len(batch.Events)) {
 				sendErr = fmt.Errorf(
-					"telemetry acknowledgement mismatch: accepted=%d buckets=%d",
+					"telemetry acknowledgement mismatch: accepted=%d events=%d",
 					result.Accepted,
-					len(batch.Buckets),
+					len(batch.Events),
 				)
 			}
 		}
