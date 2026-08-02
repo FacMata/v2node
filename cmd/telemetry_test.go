@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/telemetry"
 )
@@ -37,6 +40,37 @@ func TestOpenTelemetryPipelineSkipsUnavailableRoute(t *testing.T) {
 	if err == nil {
 		_ = pipeline.Close()
 		t.Fatal("openTelemetryPipeline() error = nil")
+	}
+}
+
+func TestTelemetryStartupFailureLogsWarning(t *testing.T) {
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	previousOutput := logger.Out
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+		logger.SetOutput(previousOutput)
+	})
+	logger.SetLevel(log.WarnLevel)
+	logger.SetOutput(io.Discard)
+	hook := logtest.NewGlobal()
+
+	warnTelemetryUnavailable(http.ErrServerClosed)
+
+	entry := hook.LastEntry()
+	if entry == nil {
+		t.Fatal("warning log entry = nil")
+	}
+	if entry.Level != log.WarnLevel {
+		t.Fatalf("warning log level = %s, want warning", entry.Level)
+	}
+	if entry.Message != "Telemetry unavailable for affected nodes; continuing without telemetry" {
+		t.Fatalf("warning log message = %q", entry.Message)
+	}
+	if entry.Data["err"] != http.ErrServerClosed {
+		t.Fatalf("warning log err = %v", entry.Data["err"])
 	}
 }
 

@@ -13,8 +13,9 @@ environment secret is required.
 
 At startup and config reload, v2node probes the endpoint with the same Server
 API identity. Telemetry starts only when the authenticated route responds with
-the expected invalid-payload code. Missing routes and authentication failures
-are skipped without affecting node startup.
+the expected invalid-payload code. Any unsuccessful exchange skips telemetry
+for the affected node and emits one warning without affecting node startup,
+reload, or proxy forwarding.
 
 When `Telemetry.Endpoint` is omitted, v2node uses:
 
@@ -41,8 +42,10 @@ Optional configuration:
 }
 ```
 
-Set `Telemetry.Enabled` to `false` for an explicit per-node opt-out. Missing
-`Telemetry` configuration means enabled.
+Missing `Telemetry` configuration means enabled. An unreachable, unsupported,
+or unauthenticated endpoint is detected automatically, so it does not require
+an explicit `Telemetry.Enabled: false`. The flag remains available only for an
+intentional per-node opt-out that must not probe the endpoint.
 
 Each logical dispatch is reported as one raw event. Source IP and normalized
 destination address are sent as canonical plaintext inside the HTTPS JSON

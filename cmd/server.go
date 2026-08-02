@@ -91,7 +91,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	log.Info("Got nodes info from server")
 	telemetryManager, err := newTelemetryManager(c)
 	if err != nil {
-		log.WithField("err", err).Error("Telemetry disabled for invalid node configurations")
+		warnTelemetryUnavailable(err)
 	}
 	if telemetryManager == nil {
 		telemetryManager, _ = telemetry.NewManager()
@@ -219,8 +219,7 @@ func reload(
 	}
 	newTelemetry, telemetryErr := newTelemetryManager(newConf)
 	if telemetryErr != nil {
-		log.WithField("err", telemetryErr).
-			Error("Telemetry disabled for invalid node configurations")
+		warnTelemetryUnavailable(telemetryErr)
 	}
 	if newTelemetry == nil {
 		newTelemetry, _ = telemetry.NewManager()
@@ -249,4 +248,9 @@ func reload(
 
 	runtime.GC()
 	return nil
+}
+
+func warnTelemetryUnavailable(err error) {
+	log.WithField("err", err).
+		Warn("Telemetry unavailable for affected nodes; continuing without telemetry")
 }
