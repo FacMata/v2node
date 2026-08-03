@@ -108,6 +108,8 @@ type DefaultDispatcher struct {
 	stats        stats.Manager
 	fdns         dns.FakeDNSEngine
 	telemetry    atomic.Pointer[telemetrySinkHolder]
+	rawRejected  sync.Once
+	sinkRejected sync.Once
 	Counter      sync.Map
 	LinkManagers sync.Map // map[string]*LinkManager
 }
@@ -180,9 +182,16 @@ func (d *DefaultDispatcher) observeTelemetry(
 		dispatchResult,
 	)
 	if !ok {
+		d.rawRejected.Do(func() {
+			errors.LogWarning(ctx, "telemetry observation dropped before identity mapping")
+		})
 		return
 	}
-	holder.sink.ObserveRaw(observation)
+	if !holder.sink.ObserveRaw(observation) {
+		d.sinkRejected.Do(func() {
+			errors.LogWarning(ctx, "telemetry observation rejected after identity mapping")
+		})
+	}
 }
 
 func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, *limiter.Limiter, error) {

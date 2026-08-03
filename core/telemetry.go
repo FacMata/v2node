@@ -1,6 +1,9 @@
 package core
 
 import (
+	"sync"
+
+	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/telemetry"
 )
@@ -9,6 +12,11 @@ type telemetryAdapter struct {
 	users *UserMap
 	nodes map[string]uint64
 	sink  telemetry.Sink
+
+	misconfiguredOnce sync.Once
+	unknownUserOnce   sync.Once
+	unknownNodeOnce   sync.Once
+	sinkRejectedOnce  sync.Once
 }
 
 func newTelemetryAdapter(
@@ -30,18 +38,30 @@ func newTelemetryAdapter(
 }
 
 func (a *telemetryAdapter) ObserveRaw(raw telemetry.RawObservation) bool {
-	if a == nil || a.users == nil || a.sink == nil {
+	if a == nil {
+		return false
+	}
+	if a.users == nil || a.sink == nil {
+		a.misconfiguredOnce.Do(func() {
+			log.Warn("Telemetry observation dropped: adapter is unavailable")
+		})
 		return false
 	}
 	userID, ok := a.users.ResolveUser(raw.UserEmail)
 	if !ok {
+		a.unknownUserOnce.Do(func() {
+			log.Warn("Telemetry observation dropped: user identity could not be resolved")
+		})
 		return false
 	}
 	nodeID, ok := a.nodes[raw.InboundTag]
 	if !ok {
+		a.unknownNodeOnce.Do(func() {
+			log.Warn("Telemetry observation dropped: node identity could not be resolved")
+		})
 		return false
 	}
-	return a.sink.Observe(telemetry.Observation{
+	accepted := a.sink.Observe(telemetry.Observation{
 		ObservedAt:          raw.ObservedAt,
 		UserID:              userID,
 		NodeID:              nodeID,
@@ -65,6 +85,12 @@ func (a *telemetryAdapter) ObserveRaw(raw telemetry.RawObservation) bool {
 		LatencyMilliseconds: raw.LatencyMilliseconds,
 		CompletenessStatus:  raw.CompletenessStatus,
 	})
+	if !accepted {
+		a.sinkRejectedOnce.Do(func() {
+			log.Warn("Telemetry observation dropped: collector rejected the event")
+		})
+	}
+	return accepted
 }
 
 func (u *UserMap) ResolveUser(email string) (uint64, bool) {
