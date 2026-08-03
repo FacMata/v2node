@@ -93,6 +93,11 @@ derived from the current Server API key, so there is no separately provisioned
 secret. Server API key rotation intentionally invalidates old queued batches;
 all affected node entries must be reconfigured together.
 
+Schema v2 stores its stream state, queue, and pipeline state under the
+`schema-v2/` subdirectory of each configured `QueueDirectory`. Legacy schema v1
+state remains untouched. The separate generation prevents one `stream_id` from
+mixing schemas and keeps an old-binary rollback from consuming v2 queue files.
+
 `pipeline-state-<node>.json` and the queue loss counter contain only control and
 counter metadata and use owner-only permissions. They do not contain source IP,
 destination, or Server API credentials.

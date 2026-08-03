@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const schemaV2StateDirectory = "schema-v2"
+
 type RuntimeConfig struct {
 	NodeID           uint64
 	APIKey           string
@@ -26,7 +28,11 @@ type RuntimeConfig struct {
 
 func OpenRuntimePipeline(config RuntimeConfig) (*Pipeline, error) {
 	protector := NewSourceProtector()
-	state, err := openStreamState(config.QueueDirectory, config.NodeID)
+	stateDirectory := filepath.Join(
+		config.QueueDirectory,
+		schemaV2StateDirectory,
+	)
+	state, err := openStreamState(stateDirectory, config.NodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +40,7 @@ func OpenRuntimePipeline(config RuntimeConfig) (*Pipeline, error) {
 		[]byte("v2node-telemetry-queue-v1\x00" + config.APIKey),
 	)
 	queue, err := OpenDiskQueue(QueueConfig{
-		Directory:       filepath.Join(config.QueueDirectory, "queue"),
+		Directory:       filepath.Join(stateDirectory, "queue"),
 		NodeID:          config.NodeID,
 		StreamID:        state.StreamID,
 		WriteKeyVersion: 1,
@@ -59,7 +65,7 @@ func OpenRuntimePipeline(config RuntimeConfig) (*Pipeline, error) {
 	pipeline, err := NewPipeline(PipelineConfig{
 		NodeID:           config.NodeID,
 		CollectorVersion: config.CollectorVersion,
-		StateDirectory:   config.QueueDirectory,
+		StateDirectory:   stateDirectory,
 		BufferSize:       config.BufferSize,
 		FlushInterval:    config.FlushInterval,
 		RetryMin:         config.RetryMin,

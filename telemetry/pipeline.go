@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	log "github.com/sirupsen/logrus"
 )
 
 type PipelineConfig struct {
@@ -39,6 +40,7 @@ type Pipeline struct {
 	closeOnce      sync.Once
 	cancel         context.CancelFunc
 	quarantined    atomic.Uint64
+	permanentOnce  sync.Once
 	stateErrors    atomic.Uint64
 	started        atomic.Bool
 	controlMu      sync.RWMutex
@@ -378,6 +380,13 @@ func (p *Pipeline) runSender(ctx context.Context) {
 		if errors.As(sendErr, &responseErr) && !responseErr.Retryable {
 			if err := p.queue.Ack(record.ID); err == nil {
 				p.quarantined.Add(1)
+				p.permanentOnce.Do(func() {
+					log.WithFields(log.Fields{
+						"node_id": p.config.NodeID,
+						"status":  responseErr.StatusCode,
+						"code":    responseErr.Code,
+					}).Warn("Telemetry batch quarantined after permanent server rejection")
+				})
 				backoff = p.config.RetryMin
 				continue
 			}

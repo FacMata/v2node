@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 func TestPipelineQueuesSendsAndAcknowledgesBatch(t *testing.T) {
@@ -79,6 +82,89 @@ func TestPipelineQueuesSendsAndAcknowledgesBatch(t *testing.T) {
 	}
 	if state.NextSequence != 2 {
 		t.Fatalf("next sequence = %d, want 2", state.NextSequence)
+	}
+}
+
+func TestPipelineLogsPermanentServerRejectionOnce(t *testing.T) {
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	previousOutput := logger.Out
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+		logger.SetOutput(previousOutput)
+	})
+	logger.SetLevel(log.WarnLevel)
+	logger.SetOutput(io.Discard)
+	hook := logtest.NewGlobal()
+
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter,
+		_ *http.Request,
+	) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"code":"TELEMETRY_STREAM_SCHEMA_CONFLICT"}`)
+	}))
+	defer server.Close()
+
+	pipeline := newTestPipeline(t, t.TempDir(), server.URL)
+	if err := pipeline.ApplyControl(ControlState{
+		CollectorEnabled: true,
+		Mode:             "observe",
+		ModeEpoch:        1,
+		ControlTTL:       time.Minute,
+	}); err != nil {
+		t.Fatalf("ApplyControl() error = %v", err)
+	}
+	pipeline.Start(context.Background())
+	observe := func() {
+		t.Helper()
+		if !pipeline.Observe(Observation{
+			ObservedAt:         time.Now().UTC(),
+			UserID:             42,
+			NodeID:             7,
+			SourceIP:           netip.MustParseAddr("1.2.3.4"),
+			Destination:        Destination{Address: "1.1.1.1", Port: 443, Kind: DestinationIPv4},
+			Network:            NetworkTCP,
+			Outcome:            ConnectionOutcomeAccepted,
+			FailureStage:       FailureStageNone,
+			CompletenessStatus: CompletenessReady,
+		}) {
+			t.Fatal("Observe() rejected")
+		}
+	}
+
+	observe()
+	deadline := time.Now().Add(2 * time.Second)
+	for pipeline.QuarantinedCount() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if pipeline.QuarantinedCount() < 1 {
+		t.Fatal("first permanently rejected batch was not quarantined")
+	}
+	observe()
+	deadline = time.Now().Add(2 * time.Second)
+	for pipeline.QuarantinedCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if pipeline.QuarantinedCount() < 2 {
+		t.Fatal("second permanently rejected batch was not quarantined")
+	}
+	if err := pipeline.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	entries := hook.AllEntries()
+	if len(entries) != 1 {
+		t.Fatalf("warning count = %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.Message != "Telemetry batch quarantined after permanent server rejection" ||
+		entry.Data["node_id"] != uint64(7) ||
+		entry.Data["status"] != http.StatusConflict ||
+		entry.Data["code"] != "TELEMETRY_STREAM_SCHEMA_CONFLICT" {
+		t.Fatalf("warning entry = %#v", entry)
 	}
 }
 
