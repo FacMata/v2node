@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,12 +51,13 @@ type QueueRecord struct {
 }
 
 type DiskQueue struct {
-	config  QueueConfig
-	aeads   map[uint16]cipher.AEAD
-	lock    *flock.Flock
-	mu      sync.Mutex
-	now     func() time.Time
-	dropped atomic.Uint64
+	config      QueueConfig
+	aeads       map[uint16]cipher.AEAD
+	lock        *flock.Flock
+	droppedPath string
+	mu          sync.Mutex
+	now         func() time.Time
+	dropped     atomic.Uint64
 }
 
 type queueHeader struct {
@@ -114,12 +116,21 @@ func OpenDiskQueue(config QueueConfig) (*DiskQueue, error) {
 		return nil, fmt.Errorf("telemetry queue is already open")
 	}
 
-	return &DiskQueue{
-		config: config,
-		aeads:  aeads,
-		lock:   queueLock,
-		now:    time.Now,
-	}, nil
+	droppedPath := filepath.Join(config.Directory, ".dropped-count")
+	droppedCount, err := loadDroppedCount(droppedPath)
+	if err != nil {
+		_ = queueLock.Unlock()
+		return nil, err
+	}
+	queue := &DiskQueue{
+		config:      config,
+		aeads:       aeads,
+		lock:        queueLock,
+		droppedPath: droppedPath,
+		now:         time.Now,
+	}
+	queue.dropped.Store(droppedCount)
+	return queue, nil
 }
 
 func (q *DiskQueue) Enqueue(record QueueRecord) error {
@@ -186,11 +197,14 @@ func (q *DiskQueue) Enqueue(record QueueRecord) error {
 		if err != nil {
 			return fmt.Errorf("stat queue record: %w", err)
 		}
+		dropped := queueRecordEventCount(files[0])
 		if err := os.Remove(files[0]); err != nil {
 			return fmt.Errorf("drop oldest queue record: %w", err)
 		}
 		currentBytes -= info.Size()
-		q.dropped.Add(1)
+		if err := q.addDroppedLocked(dropped); err != nil {
+			return err
+		}
 	}
 
 	name := fmt.Sprintf("%020d-%s.tq", record.SequenceFirst, record.ID.String())
@@ -265,10 +279,35 @@ func (q *DiskQueue) DropHead() error {
 	if len(files) == 0 {
 		return ErrQueueEmpty
 	}
+	dropped := queueRecordEventCount(files[0])
 	if err := os.Remove(files[0]); err != nil {
 		return fmt.Errorf("drop queue head: %w", err)
 	}
-	q.dropped.Add(1)
+	if err := q.addDroppedLocked(dropped); err != nil {
+		return err
+	}
+	return syncDirectory(q.config.Directory)
+}
+
+func (q *DiskQueue) DropAll() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	files, err := q.filesLocked()
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	for _, path := range files {
+		dropped := queueRecordEventCount(path)
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("drop queue record: %w", err)
+		}
+		if err := q.addDroppedLocked(dropped); err != nil {
+			return err
+		}
+	}
 	return syncDirectory(q.config.Directory)
 }
 
@@ -303,8 +342,19 @@ func (q *DiskQueue) DroppedCount() uint64 {
 	return q.dropped.Load()
 }
 
-func (q *DiskQueue) TakeDroppedCount() uint64 {
-	return q.dropped.Swap(0)
+func (q *DiskQueue) TakeDroppedCount() (uint64, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	count := q.dropped.Load()
+	if count == 0 {
+		return 0, nil
+	}
+	q.dropped.Store(0)
+	if err := q.persistDroppedLocked(); err != nil {
+		q.dropped.Store(count)
+		return 0, err
+	}
+	return count, nil
 }
 
 func (q *DiskQueue) LastSequence() (uint64, error) {
@@ -384,11 +434,63 @@ func (q *DiskQueue) purgeExpiredLocked() error {
 		if err := os.Remove(path); err != nil {
 			return fmt.Errorf("expire queue record: %w", err)
 		}
-		q.dropped.Add(1)
+		if err := q.addDroppedLocked(sequenceEventCount(header)); err != nil {
+			return err
+		}
 		removed = true
 	}
 	if removed {
 		return syncDirectory(q.config.Directory)
+	}
+	return nil
+}
+
+func loadDroppedCount(path string) (uint64, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read queue dropped count: %w", err)
+	}
+	count, err := strconv.ParseUint(string(bytes.TrimSpace(data)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("decode queue dropped count: %w", err)
+	}
+	return count, nil
+}
+
+func queueRecordEventCount(path string) uint64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 1
+	}
+	header, _, _, _, err := unmarshalQueueRecord(data)
+	if err != nil {
+		return 1
+	}
+	return sequenceEventCount(header)
+}
+
+func sequenceEventCount(header queueHeader) uint64 {
+	if header.sequenceFirst == 0 || header.sequenceLast < header.sequenceFirst {
+		return 1
+	}
+	return header.sequenceLast - header.sequenceFirst + 1
+}
+
+func (q *DiskQueue) addDroppedLocked(count uint64) error {
+	if count == 0 {
+		return nil
+	}
+	q.dropped.Add(count)
+	return q.persistDroppedLocked()
+}
+
+func (q *DiskQueue) persistDroppedLocked() error {
+	data := []byte(strconv.FormatUint(q.dropped.Load(), 10) + "\n")
+	if err := atomicWriteFile(q.droppedPath, data, 0o600); err != nil {
+		return fmt.Errorf("persist queue dropped count: %w", err)
 	}
 	return nil
 }

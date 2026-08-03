@@ -31,16 +31,19 @@ type Pipeline struct {
 	queue          *DiskQueue
 	sender         *Sender
 	state          *streamState
+	persistent     *persistentPipelineState
 	collector      *Collector
 	wake           chan struct{}
 	done           chan struct{}
 	startOnce      sync.Once
 	closeOnce      sync.Once
 	cancel         context.CancelFunc
-	pendingDropped atomic.Uint64
 	quarantined    atomic.Uint64
 	stateErrors    atomic.Uint64
 	started        atomic.Bool
+	controlMu      sync.RWMutex
+	control        ControlState
+	controlExpires time.Time
 }
 
 func NewPipeline(
@@ -79,18 +82,36 @@ func NewPipeline(
 	if err := state.reconcile(lastSequence); err != nil {
 		return nil, err
 	}
+	persistent, err := openPersistentPipelineState(config.StateDirectory, config.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	control := ControlState{
+		CollectorEnabled: true,
+		Mode:             "observe",
+		ControlTTL:       24 * time.Hour,
+	}
+	controlExpires := time.Now().Add(control.ControlTTL)
+	if savedControl, savedExpiry, ok := persistent.initialControl(); ok {
+		control = savedControl
+		controlExpires = savedExpiry
+	}
 
 	pipeline := &Pipeline{
-		config: config,
-		queue:  queue,
-		sender: sender,
-		state:  state,
-		wake:   make(chan struct{}, 1),
-		done:   make(chan struct{}),
+		config:         config,
+		queue:          queue,
+		sender:         sender,
+		state:          state,
+		persistent:     persistent,
+		wake:           make(chan struct{}, 1),
+		done:           make(chan struct{}),
+		control:        control,
+		controlExpires: controlExpires,
 	}
 	collector, err := NewCollector(CollectorConfig{
 		BufferSize:    config.BufferSize,
 		FlushInterval: config.FlushInterval,
+		DropReporter:  pipeline.recordDropped,
 	}, buffer, pipeline.enqueueEmission)
 	if err != nil {
 		return nil, err
@@ -106,6 +127,9 @@ func (p *Pipeline) Start(parent context.Context) {
 		p.cancel = cancel
 		p.collector.Start(ctx)
 		go p.runSender(ctx)
+		if p.sender.HasControlEndpoint() {
+			go p.runControl(ctx)
+		}
 	})
 }
 
@@ -113,7 +137,62 @@ func (p *Pipeline) Observe(observation Observation) bool {
 	if observation.NodeID != p.config.NodeID {
 		return false
 	}
+	p.controlMu.RLock()
+	enabled := p.control.CollectorEnabled &&
+		p.control.Mode != "off" && time.Now().Before(p.controlExpires)
+	p.controlMu.RUnlock()
+	if !enabled {
+		return false
+	}
 	return p.collector.Observe(observation)
+}
+
+func (p *Pipeline) ApplyControl(control ControlState) error {
+	if control.ModeEpoch == 0 || control.ControlTTL <= 0 {
+		return fmt.Errorf("telemetry control epoch and TTL are required")
+	}
+	if control.Mode != "off" && control.Mode != "observe" &&
+		control.Mode != "auto_protect" {
+		return fmt.Errorf("telemetry control mode is invalid")
+	}
+	if control.Mode == "off" && control.CollectorEnabled {
+		return fmt.Errorf("off telemetry control cannot enable collector")
+	}
+
+	p.controlMu.Lock()
+	defer p.controlMu.Unlock()
+	previousEpoch := p.control.ModeEpoch
+	if previousEpoch > control.ModeEpoch {
+		return fmt.Errorf("telemetry control epoch is stale")
+	}
+	if previousEpoch == control.ModeEpoch && previousEpoch != 0 &&
+		(p.control.Mode != control.Mode ||
+			p.control.CollectorEnabled != control.CollectorEnabled) {
+		return fmt.Errorf("telemetry control conflicts with current epoch")
+	}
+	if previousEpoch == 0 {
+		drop, err := p.queueConflictsWithControl(control)
+		if err != nil {
+			return err
+		}
+		if drop {
+			if err := p.queue.DropAll(); err != nil {
+				return err
+			}
+		}
+	} else if previousEpoch < control.ModeEpoch {
+		if err := p.queue.DropAll(); err != nil {
+			return err
+		}
+	}
+	expiresAt := time.Now().Add(control.ControlTTL)
+	if err := p.persistent.saveControl(control, expiresAt); err != nil {
+		p.stateErrors.Add(1)
+		return err
+	}
+	p.control = control
+	p.controlExpires = expiresAt
+	return nil
 }
 
 func (p *Pipeline) Close() error {
@@ -151,16 +230,37 @@ func (p *Pipeline) StatePersistErrorCount() uint64 {
 }
 
 func (p *Pipeline) enqueueEmission(emission Emission) error {
+	p.controlMu.RLock()
+	defer p.controlMu.RUnlock()
+	if !p.control.CollectorEnabled || p.control.Mode == "off" ||
+		!time.Now().Before(p.controlExpires) {
+		p.recordDropped(uint64(len(emission.Events)))
+		return nil
+	}
 	streamID, sequenceFirst := p.state.snapshot()
+	schemaVersion := uint16(1)
+	if p.control.ModeEpoch > 0 {
+		schemaVersion = 2
+	}
 	batchID, err := uuid.NewV7()
 	if err != nil {
 		return fmt.Errorf("generate telemetry batch ID: %w", err)
 	}
-	dropped := p.pendingDropped.Swap(0) +
-		p.queue.TakeDroppedCount() +
-		p.collector.dropped.Swap(0)
+	dropped, err := p.persistent.takeDropped()
+	if err != nil {
+		p.stateErrors.Add(1)
+		return err
+	}
+	queueDropped, err := p.queue.TakeDroppedCount()
+	if err != nil {
+		p.recordDropped(dropped)
+		p.stateErrors.Add(1)
+		return err
+	}
+	dropped += queueDropped
 	batch, err := AssembleBatch(BatchParams{
-		SchemaVersion:    1,
+		SchemaVersion:    schemaVersion,
+		ModeEpoch:        p.control.ModeEpoch,
 		BatchID:          batchID,
 		NodeID:           p.config.NodeID,
 		StreamID:         streamID,
@@ -170,12 +270,12 @@ func (p *Pipeline) enqueueEmission(emission Emission) error {
 		DroppedCount:     dropped,
 	}, emission)
 	if err != nil {
-		p.pendingDropped.Add(dropped + uint64(len(emission.Events)))
+		p.recordDropped(dropped + uint64(len(emission.Events)))
 		return err
 	}
 	body, err := json.Marshal(batch)
 	if err != nil {
-		p.pendingDropped.Add(dropped + uint64(len(emission.Events)))
+		p.recordDropped(dropped + uint64(len(emission.Events)))
 		return fmt.Errorf("marshal telemetry batch: %w", err)
 	}
 	if err := p.queue.Enqueue(QueueRecord{
@@ -185,10 +285,15 @@ func (p *Pipeline) enqueueEmission(emission Emission) error {
 		SequenceLast:  batch.SequenceLast,
 		Payload:       body,
 	}); err != nil {
-		p.pendingDropped.Add(dropped)
+		p.recordDropped(dropped)
 		return err
 	}
-	p.pendingDropped.Add(p.queue.TakeDroppedCount())
+	queueDropped, err = p.queue.TakeDroppedCount()
+	if err != nil {
+		p.stateErrors.Add(1)
+	} else {
+		p.recordDropped(queueDropped)
+	}
 	if err := p.state.advance(batch.SequenceLast); err != nil {
 		// The encrypted queue record is the recovery truth. In-memory state has
 		// already advanced, and startup reconciles from queued sequence headers.
@@ -196,6 +301,15 @@ func (p *Pipeline) enqueueEmission(emission Emission) error {
 	}
 	p.signalSender()
 	return nil
+}
+
+func (p *Pipeline) recordDropped(count uint64) {
+	if count == 0 {
+		return
+	}
+	if err := p.persistent.addDropped(count); err != nil {
+		p.stateErrors.Add(1)
+	}
 }
 
 func (p *Pipeline) runSender(ctx context.Context) {
@@ -237,6 +351,12 @@ func (p *Pipeline) runSender(ctx context.Context) {
 			backoff = nextBackoff(backoff, p.config.RetryMax)
 			continue
 		}
+		if !p.deliveryAllowed() {
+			if !waitForRetry(ctx, p.config.RetryMin) {
+				return
+			}
+			continue
+		}
 		result, sendErr := p.sender.Send(ctx, record.Payload)
 		if sendErr == nil {
 			if !result.Duplicate && result.Accepted != uint32(len(batch.Events)) {
@@ -271,6 +391,71 @@ func (p *Pipeline) runSender(ctx context.Context) {
 		}
 		backoff = nextBackoff(backoff, p.config.RetryMax)
 	}
+}
+
+func (p *Pipeline) runControl(ctx context.Context) {
+	for {
+		delay := p.controlRefreshDelay()
+		if !waitForRetry(ctx, delay) {
+			return
+		}
+		p.controlMu.RLock()
+		modeEpoch := p.control.ModeEpoch
+		p.controlMu.RUnlock()
+		control, err := p.sender.FetchControl(ctx, modeEpoch)
+		if err != nil {
+			continue
+		}
+		if err := p.ApplyControl(control); err != nil {
+			continue
+		}
+		p.signalSender()
+	}
+}
+
+func (p *Pipeline) queueConflictsWithControl(control ControlState) (bool, error) {
+	if control.Mode == "off" {
+		return true, nil
+	}
+	record, err := p.queue.Peek()
+	if errors.Is(err, ErrQueueEmpty) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var envelope struct {
+		SchemaVersion uint16 `json:"schema_version"`
+		ModeEpoch     uint64 `json:"mode_epoch"`
+	}
+	if err := json.Unmarshal(record.Payload, &envelope); err != nil {
+		return true, nil
+	}
+	return envelope.SchemaVersion != 2 ||
+		envelope.ModeEpoch != control.ModeEpoch, nil
+}
+
+func (p *Pipeline) deliveryAllowed() bool {
+	p.controlMu.RLock()
+	defer p.controlMu.RUnlock()
+	if p.control.ModeEpoch == 0 {
+		return true
+	}
+	return p.control.CollectorEnabled && p.control.Mode != "off" &&
+		time.Now().Before(p.controlExpires)
+}
+
+func (p *Pipeline) controlRefreshDelay() time.Duration {
+	p.controlMu.RLock()
+	defer p.controlMu.RUnlock()
+	delay := time.Until(p.controlExpires) / 2
+	if delay < p.config.RetryMin {
+		return p.config.RetryMin
+	}
+	if delay > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return delay
 }
 
 func (p *Pipeline) signalSender() {

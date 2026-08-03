@@ -11,6 +11,13 @@ import (
 	"github.com/xtls/xray-core/common/session"
 )
 
+type dispatchTelemetryResult struct {
+	Outcome      telemetry.ConnectionOutcome
+	FailureStage telemetry.FailureStage
+	LossReason   telemetry.LossReason
+	Latency      time.Duration
+}
+
 func rawTelemetryObservation(
 	ctx context.Context,
 	original xnet.Destination,
@@ -21,7 +28,6 @@ func rawTelemetryObservation(
 	if inbound == nil ||
 		inbound.User == nil ||
 		inbound.User.Email == "" ||
-		inbound.Tag == "" ||
 		!inbound.Source.IsValid() ||
 		!original.IsValid() {
 		return telemetry.RawObservation{}, false
@@ -78,6 +84,56 @@ func rawTelemetryObservation(
 		SniffSource: sniffSource,
 		Confidence:  confidence,
 	}, true
+}
+
+func rawConnectionTelemetryObservation(
+	ctx context.Context,
+	original xnet.Destination,
+	result SniffResult,
+	observedAt time.Time,
+	dispatchResult dispatchTelemetryResult,
+) (telemetry.RawObservation, bool) {
+	observation, ok := rawTelemetryObservation(ctx, original, result, observedAt)
+	if !ok {
+		return telemetry.RawObservation{}, false
+	}
+	inbound := session.InboundFromContext(ctx)
+	listener := inbound.Name
+	if listener == "" {
+		listener = inbound.Tag
+	}
+	listenPort := uint16(0)
+	if inbound.Local.IsValid() {
+		listenPort = uint16(inbound.Local.Port)
+	}
+	runtimeSNI := ""
+	runtimeHTTPHost := ""
+	if observation.AppProtocol == telemetry.AppProtocolTLS && result != nil {
+		runtimeSNI = strings.TrimSuffix(strings.ToLower(result.Domain()), ".")
+	} else if observation.AppProtocol == telemetry.AppProtocolHTTP && result != nil {
+		runtimeHTTPHost = strings.TrimSuffix(strings.ToLower(result.Domain()), ".")
+	}
+	latency := dispatchResult.Latency
+	if latency < 0 {
+		latency = 0
+	}
+	completeness := telemetry.CompletenessReady
+	if listener == "" || listenPort == 0 ||
+		dispatchResult.Outcome == "" ||
+		dispatchResult.Outcome == telemetry.ConnectionOutcomeUnknown {
+		completeness = telemetry.CompletenessPartial
+	}
+	observation.RuntimeListener = listener
+	observation.RuntimeListenPort = listenPort
+	observation.RuntimeSNI = runtimeSNI
+	observation.RuntimeHTTPHost = runtimeHTTPHost
+	observation.RuntimeProtocol = observation.AppProtocol
+	observation.Outcome = dispatchResult.Outcome
+	observation.FailureStage = dispatchResult.FailureStage
+	observation.LossReason = dispatchResult.LossReason
+	observation.LatencyMilliseconds = uint64(latency / time.Millisecond)
+	observation.CompletenessStatus = completeness
+	return observation, true
 }
 
 func destinationAddress(address xnet.Address) string {

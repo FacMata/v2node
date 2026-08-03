@@ -10,6 +10,8 @@ type RuntimeConfig struct {
 	NodeID           uint64
 	APIKey           string
 	Endpoint         string
+	ControlEndpoint  string
+	InitialControl   *ControlState
 	QueueDirectory   string
 	QueueMaxBytes    int64
 	QueueMaxAge      time.Duration
@@ -44,10 +46,11 @@ func OpenRuntimePipeline(config RuntimeConfig) (*Pipeline, error) {
 		return nil, err
 	}
 	sender, err := NewSender(SenderConfig{
-		Endpoint: config.Endpoint,
-		Timeout:  config.RequestTimeout,
-		NodeID:   config.NodeID,
-		APIKey:   config.APIKey,
+		Endpoint:        config.Endpoint,
+		ControlEndpoint: config.ControlEndpoint,
+		Timeout:         config.RequestTimeout,
+		NodeID:          config.NodeID,
+		APIKey:          config.APIKey,
 	})
 	if err != nil {
 		_ = queue.Close()
@@ -66,6 +69,12 @@ func OpenRuntimePipeline(config RuntimeConfig) (*Pipeline, error) {
 	if err != nil {
 		_ = queue.Close()
 		return nil, err
+	}
+	if config.InitialControl != nil {
+		if err := pipeline.ApplyControl(*config.InitialControl); err != nil {
+			_ = pipeline.Close()
+			return nil, err
+		}
 	}
 	return pipeline, nil
 }

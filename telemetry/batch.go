@@ -20,6 +20,7 @@ var eventNamespace = uuid.MustParse("1527fc78-b14e-46d6-9c2e-4e680e22abf8")
 
 type BatchParams struct {
 	SchemaVersion    uint16
+	ModeEpoch        uint64
 	BatchID          uuid.UUID
 	NodeID           uint64
 	StreamID         uuid.UUID
@@ -31,6 +32,7 @@ type BatchParams struct {
 
 type Batch struct {
 	SchemaVersion                  uint16           `json:"schema_version"`
+	ModeEpoch                      uint64           `json:"mode_epoch,omitempty"`
 	BatchID                        string           `json:"batch_id"`
 	NodeID                         uint64           `json:"node_id"`
 	StreamID                       string           `json:"stream_id"`
@@ -44,27 +46,41 @@ type Batch struct {
 }
 
 type WireEvent struct {
-	EventID            uuid.UUID       `json:"event_id"`
-	Sequence           uint64          `json:"sequence"`
-	ObservedAt         MillisTime      `json:"observed_at"`
-	UserID             uint64          `json:"user_id"`
-	SourceRef          string          `json:"source_ref"`
-	DestinationAddress string          `json:"destination_address"`
-	DestinationKind    DestinationKind `json:"destination_kind"`
-	DestinationPort    uint16          `json:"destination_port"`
-	Network            Network         `json:"network"`
-	AppProtocol        AppProtocol     `json:"app_protocol"`
-	SniffSource        SniffSource     `json:"sniff_source"`
-	SniffConfidence    Confidence      `json:"sniff_confidence"`
-	UploadBytes        uint64          `json:"upload_bytes"`
-	DownloadBytes      uint64          `json:"download_bytes"`
-	ActiveMilliseconds uint64          `json:"active_milliseconds"`
-	ObservationKind    ObservationKind `json:"observation_kind"`
+	EventID             uuid.UUID          `json:"event_id"`
+	Sequence            uint64             `json:"sequence"`
+	ObservedAt          MillisTime         `json:"observed_at"`
+	UserID              uint64             `json:"user_id"`
+	SourceRef           string             `json:"source_ref"`
+	DestinationAddress  string             `json:"destination_address"`
+	DestinationKind     DestinationKind    `json:"destination_kind"`
+	DestinationPort     uint16             `json:"destination_port"`
+	Network             Network            `json:"network"`
+	AppProtocol         AppProtocol        `json:"app_protocol"`
+	SniffSource         SniffSource        `json:"sniff_source"`
+	SniffConfidence     Confidence         `json:"sniff_confidence"`
+	UploadBytes         uint64             `json:"upload_bytes"`
+	DownloadBytes       uint64             `json:"download_bytes"`
+	ActiveMilliseconds  uint64             `json:"active_milliseconds"`
+	RuntimeListener     string             `json:"runtime_listener,omitempty"`
+	RuntimeListenPort   uint16             `json:"runtime_listen_port,omitempty"`
+	RuntimeSNI          string             `json:"runtime_sni,omitempty"`
+	RuntimeHTTPHost     string             `json:"runtime_http_host,omitempty"`
+	RuntimeProtocol     AppProtocol        `json:"runtime_protocol,omitempty"`
+	InboundTag          string             `json:"inbound_tag,omitempty"`
+	Outcome             ConnectionOutcome  `json:"outcome,omitempty"`
+	FailureStage        FailureStage       `json:"failure_stage,omitempty"`
+	LossReason          LossReason         `json:"loss_reason,omitempty"`
+	LatencyMilliseconds uint64             `json:"latency_milliseconds,omitempty"`
+	CompletenessStatus  CompletenessStatus `json:"completeness_status,omitempty"`
+	ObservationKind     ObservationKind    `json:"observation_kind"`
 }
 
 func AssembleBatch(params BatchParams, emission Emission) (Batch, error) {
-	if params.SchemaVersion != 1 {
+	if params.SchemaVersion != 1 && params.SchemaVersion != 2 {
 		return Batch{}, fmt.Errorf("unsupported telemetry schema version %d", params.SchemaVersion)
+	}
+	if params.SchemaVersion == 2 && params.ModeEpoch == 0 {
+		return Batch{}, fmt.Errorf("mode epoch is required for telemetry schema version 2")
 	}
 	if params.BatchID == uuid.Nil || params.StreamID == uuid.Nil {
 		return Batch{}, fmt.Errorf("batch and stream IDs are required")
@@ -117,25 +133,47 @@ func AssembleBatch(params BatchParams, emission Emission) (Batch, error) {
 		if event.DestinationAddress == "" {
 			return Batch{}, fmt.Errorf("event destination is required")
 		}
+		if params.SchemaVersion == 2 {
+			if event.ObservationKind != ObservationKindConnection {
+				return Batch{}, fmt.Errorf("schema version 2 requires connection observations")
+			}
+			if event.Outcome == "" || event.CompletenessStatus == "" {
+				return Batch{}, fmt.Errorf("schema version 2 requires outcome and completeness")
+			}
+			if event.Outcome == ConnectionOutcomeUnknown && event.LossReason == "" {
+				return Batch{}, fmt.Errorf("unknown connection outcome requires loss reason")
+			}
+		}
 		sequence := params.SequenceFirst + uint64(i)
 		usedSources[event.SourceRef] = struct{}{}
 		wireEvents = append(wireEvents, WireEvent{
-			EventID:            uuid.NewSHA1(eventNamespace, []byte(params.StreamID.String()+"|"+fmt.Sprint(sequence))),
-			Sequence:           sequence,
-			ObservedAt:         MillisTime{Time: event.ObservedAt.UTC()},
-			UserID:             event.UserID,
-			SourceRef:          event.SourceRef,
-			DestinationAddress: event.DestinationAddress,
-			DestinationKind:    event.DestinationKind,
-			DestinationPort:    event.DestinationPort,
-			Network:            normalizeNetwork(event.Network),
-			AppProtocol:        normalizeAppProtocol(event.AppProtocol),
-			SniffSource:        normalizeSniffSource(event.SniffSource),
-			SniffConfidence:    normalizeConfidence(event.SniffConfidence),
-			UploadBytes:        event.UploadBytes,
-			DownloadBytes:      event.DownloadBytes,
-			ActiveMilliseconds: event.ActiveMilliseconds,
-			ObservationKind:    event.ObservationKind,
+			EventID:             uuid.NewSHA1(eventNamespace, []byte(params.StreamID.String()+"|"+fmt.Sprint(sequence))),
+			Sequence:            sequence,
+			ObservedAt:          MillisTime{Time: event.ObservedAt.UTC()},
+			UserID:              event.UserID,
+			SourceRef:           event.SourceRef,
+			DestinationAddress:  event.DestinationAddress,
+			DestinationKind:     event.DestinationKind,
+			DestinationPort:     event.DestinationPort,
+			Network:             normalizeNetwork(event.Network),
+			AppProtocol:         normalizeAppProtocol(event.AppProtocol),
+			SniffSource:         normalizeSniffSource(event.SniffSource),
+			SniffConfidence:     normalizeConfidence(event.SniffConfidence),
+			UploadBytes:         event.UploadBytes,
+			DownloadBytes:       event.DownloadBytes,
+			ActiveMilliseconds:  event.ActiveMilliseconds,
+			RuntimeListener:     event.RuntimeListener,
+			RuntimeListenPort:   event.RuntimeListenPort,
+			RuntimeSNI:          event.RuntimeSNI,
+			RuntimeHTTPHost:     event.RuntimeHTTPHost,
+			RuntimeProtocol:     event.RuntimeProtocol,
+			InboundTag:          event.InboundTag,
+			Outcome:             event.Outcome,
+			FailureStage:        event.FailureStage,
+			LossReason:          event.LossReason,
+			LatencyMilliseconds: event.LatencyMilliseconds,
+			CompletenessStatus:  event.CompletenessStatus,
+			ObservationKind:     event.ObservationKind,
 		})
 	}
 	if len(usedSources) != len(sourceRefs) {
@@ -144,6 +182,7 @@ func AssembleBatch(params BatchParams, emission Emission) (Batch, error) {
 
 	batch := Batch{
 		SchemaVersion:                  params.SchemaVersion,
+		ModeEpoch:                      params.ModeEpoch,
 		BatchID:                        params.BatchID.String(),
 		NodeID:                         params.NodeID,
 		StreamID:                       params.StreamID.String(),

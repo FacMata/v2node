@@ -16,15 +16,25 @@ import (
 const maxTelemetryResponseBytes = 64 * 1024
 
 type SenderConfig struct {
-	Endpoint string
-	Timeout  time.Duration
-	NodeID   uint64
-	APIKey   string
+	Endpoint        string
+	ControlEndpoint string
+	Timeout         time.Duration
+	NodeID          uint64
+	APIKey          string
 }
 
 type Sender struct {
-	endpoint string
-	client   *http.Client
+	endpoint        string
+	controlEndpoint string
+	apiKey          string
+	client          *http.Client
+}
+
+type ControlState struct {
+	CollectorEnabled bool
+	Mode             string
+	ModeEpoch        uint64
+	ControlTTL       time.Duration
 }
 
 type SendResult struct {
@@ -39,6 +49,10 @@ type SendError struct {
 	RetryAfter string
 }
 
+func (s *Sender) HasControlEndpoint() bool {
+	return s != nil && s.controlEndpoint != ""
+}
+
 func (e *SendError) Error() string {
 	return fmt.Sprintf("telemetry send failed: status=%d code=%s", e.StatusCode, e.Code)
 }
@@ -47,27 +61,26 @@ func NewSender(config SenderConfig) (*Sender, error) {
 	if config.NodeID == 0 || config.APIKey == "" {
 		return nil, fmt.Errorf("telemetry server API identity is required")
 	}
-	endpoint, err := url.Parse(config.Endpoint)
+	endpoint, err := authenticatedEndpoint(config.Endpoint, config.NodeID)
 	if err != nil {
-		return nil, fmt.Errorf("parse telemetry endpoint: %w", err)
-	}
-	if endpoint.User != nil || endpoint.Fragment != "" {
-		return nil, fmt.Errorf("telemetry endpoint cannot contain credentials or fragment")
-	}
-	if endpoint.Scheme != "https" && !isLoopbackHTTP(endpoint) {
-		return nil, fmt.Errorf("telemetry endpoint requires HTTPS")
+		return nil, err
 	}
 	if config.Timeout <= 0 {
 		return nil, fmt.Errorf("telemetry timeout must be positive")
 	}
-	query := endpoint.Query()
-	query.Set("node_type", "v2node")
-	query.Set("node_id", strconv.FormatUint(config.NodeID, 10))
-	query.Set("token", config.APIKey)
-	endpoint.RawQuery = query.Encode()
+	controlEndpoint := ""
+	if config.ControlEndpoint != "" {
+		parsed, err := authenticatedEndpoint(config.ControlEndpoint, config.NodeID)
+		if err != nil {
+			return nil, fmt.Errorf("control endpoint: %w", err)
+		}
+		controlEndpoint = parsed
+	}
 	return &Sender{
-		endpoint: endpoint.String(),
-		client:   &http.Client{Timeout: config.Timeout},
+		endpoint:        endpoint,
+		controlEndpoint: controlEndpoint,
+		apiKey:          config.APIKey,
+		client:          &http.Client{Timeout: config.Timeout},
 	}, nil
 }
 
@@ -166,21 +179,106 @@ func (s *Sender) Probe(ctx context.Context) error {
 	)
 }
 
+func (s *Sender) FetchControl(ctx context.Context, modeEpoch uint64) (ControlState, error) {
+	if s.controlEndpoint == "" {
+		return ControlState{}, fmt.Errorf("telemetry control endpoint is required")
+	}
+	body, err := json.Marshal(struct {
+		SchemaVersion uint16 `json:"schema_version"`
+		ModeEpoch     uint64 `json:"mode_epoch"`
+	}{SchemaVersion: 2, ModeEpoch: modeEpoch})
+	if err != nil {
+		return ControlState{}, fmt.Errorf("encode telemetry control request: %w", err)
+	}
+	request, err := s.newRequestTo(ctx, s.controlEndpoint, body)
+	if err != nil {
+		return ControlState{}, fmt.Errorf("create telemetry control request: %w", err)
+	}
+	response, err := s.client.Do(request)
+	if err != nil {
+		return ControlState{}, fmt.Errorf("fetch telemetry control: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxTelemetryResponseBytes+1))
+	if err != nil {
+		return ControlState{}, fmt.Errorf("read telemetry control response: %w", err)
+	}
+	if len(responseBody) > maxTelemetryResponseBytes {
+		return ControlState{}, fmt.Errorf("telemetry control response exceeds %d bytes", maxTelemetryResponseBytes)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return ControlState{}, fmt.Errorf("telemetry control unavailable: status=%d", response.StatusCode)
+	}
+	var payload struct {
+		Data *struct {
+			CollectorEnabled *bool  `json:"collector_enabled"`
+			Mode             string `json:"mode"`
+			ModeEpoch        uint64 `json:"mode_epoch"`
+			ControlTTL       uint32 `json:"control_ttl_seconds"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(responseBody, &payload); err != nil {
+		return ControlState{}, fmt.Errorf("decode telemetry control response: %w", err)
+	}
+	if payload.Data == nil || payload.Data.CollectorEnabled == nil ||
+		payload.Data.ModeEpoch == 0 || payload.Data.ControlTTL == 0 {
+		return ControlState{}, fmt.Errorf("telemetry control response is incomplete")
+	}
+	if payload.Data.Mode != "off" && payload.Data.Mode != "observe" &&
+		payload.Data.Mode != "auto_protect" {
+		return ControlState{}, fmt.Errorf("telemetry control mode is invalid")
+	}
+	return ControlState{
+		CollectorEnabled: *payload.Data.CollectorEnabled,
+		Mode:             payload.Data.Mode,
+		ModeEpoch:        payload.Data.ModeEpoch,
+		ControlTTL:       time.Duration(payload.Data.ControlTTL) * time.Second,
+	}, nil
+}
+
 func (s *Sender) newRequest(
 	ctx context.Context,
+	body []byte,
+) (*http.Request, error) {
+	return s.newRequestTo(ctx, s.endpoint, body)
+}
+
+func (s *Sender) newRequestTo(
+	ctx context.Context,
+	endpoint string,
 	body []byte,
 ) (*http.Request, error) {
 	request, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		s.endpoint,
+		endpoint,
 		bytes.NewReader(body),
 	)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+s.apiKey)
 	return request, nil
+}
+
+func authenticatedEndpoint(raw string, nodeID uint64) (string, error) {
+	endpoint, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse telemetry endpoint: %w", err)
+	}
+	if endpoint.User != nil || endpoint.Fragment != "" {
+		return "", fmt.Errorf("telemetry endpoint cannot contain credentials or fragment")
+	}
+	if endpoint.Scheme != "https" && !isLoopbackHTTP(endpoint) {
+		return "", fmt.Errorf("telemetry endpoint requires HTTPS")
+	}
+	query := endpoint.Query()
+	query.Set("node_type", "v2node")
+	query.Set("node_id", strconv.FormatUint(nodeID, 10))
+	query.Del("token")
+	endpoint.RawQuery = query.Encode()
+	return endpoint.String(), nil
 }
 
 func isLoopbackHTTP(endpoint *url.URL) bool {

@@ -20,8 +20,11 @@ func TestSenderPostsExactBodyWithServerAPIAuthentication(t *testing.T) {
 		}
 		if r.URL.Query().Get("node_type") != "v2node" ||
 			r.URL.Query().Get("node_id") != "7" ||
-			r.URL.Query().Get("token") != "server-api-key" {
+			r.URL.Query().Get("token") != "" {
 			t.Errorf("server API query = %q", r.URL.RawQuery)
+		}
+		if r.Header.Get("Authorization") != "Bearer server-api-key" {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
 		}
 		if r.Header.Get("X-Telemetry-Signature") != "" ||
 			r.Header.Get("X-Telemetry-Nonce") != "" {
@@ -127,7 +130,8 @@ func TestSenderRejectsMalformedSuccessfulResponse(t *testing.T) {
 
 func TestSenderProbeRequiresAuthenticatedTelemetryRoute(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("token") != "server-api-key" {
+		if r.URL.Query().Get("token") != "" ||
+			r.Header.Get("Authorization") != "Bearer server-api-key" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -147,5 +151,47 @@ func TestSenderProbeRequiresAuthenticatedTelemetryRoute(t *testing.T) {
 	}
 	if err := sender.Probe(context.Background()); err != nil {
 		t.Fatalf("Probe() error = %v", err)
+	}
+}
+
+func TestSenderFetchesAuthenticatedCollectorControl(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/server/telemetry/control" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if r.URL.Query().Get("token") != "" ||
+			r.Header.Get("Authorization") != "Bearer server-api-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("ReadAll() error = %v", err)
+		}
+		if string(body) != `{"schema_version":2,"mode_epoch":3}` {
+			t.Errorf("control body = %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"collector_enabled":true,"mode":"observe","mode_epoch":4,"control_ttl_seconds":900}}`)
+	}))
+	defer server.Close()
+
+	sender, err := NewSender(SenderConfig{
+		Endpoint:        server.URL + "/api/v2/server/telemetry/connection-events",
+		ControlEndpoint: server.URL + "/api/v2/server/telemetry/control",
+		Timeout:         time.Second,
+		NodeID:          7,
+		APIKey:          "server-api-key",
+	})
+	if err != nil {
+		t.Fatalf("NewSender() error = %v", err)
+	}
+	control, err := sender.FetchControl(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("FetchControl() error = %v", err)
+	}
+	if !control.CollectorEnabled || control.Mode != "observe" ||
+		control.ModeEpoch != 4 || control.ControlTTL != 15*time.Minute {
+		t.Fatalf("control = %#v", control)
 	}
 }

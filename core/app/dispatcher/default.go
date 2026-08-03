@@ -166,12 +166,19 @@ func (d *DefaultDispatcher) observeTelemetry(
 	destination net.Destination,
 	result SniffResult,
 	observedAt time.Time,
+	dispatchResult dispatchTelemetryResult,
 ) {
 	holder := d.telemetry.Load()
 	if holder == nil {
 		return
 	}
-	observation, ok := rawTelemetryObservation(ctx, destination, result, observedAt)
+	observation, ok := rawConnectionTelemetryObservation(
+		ctx,
+		destination,
+		result,
+		observedAt,
+		dispatchResult,
+	)
 	if !ok {
 		return
 	}
@@ -323,11 +330,18 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	observedAt := time.Now().UTC()
 	inbound, outbound, _, err := d.getLink(ctx)
 	if err != nil {
+		d.observeTelemetry(ctx, destination, nil, observedAt, dispatchTelemetryResult{
+			Outcome:      telemetry.ConnectionOutcomeFailed,
+			FailureStage: telemetry.FailureStageDispatch,
+			Latency:      time.Since(observedAt),
+		})
 		return nil, err
 	}
 	if !sniffingRequest.Enabled {
-		d.observeTelemetry(ctx, destination, nil, observedAt)
-		go d.routedDispatch(ctx, outbound, destination)
+		go func() {
+			dispatchResult := d.routedDispatch(ctx, outbound, destination, observedAt)
+			d.observeTelemetry(ctx, destination, nil, observedAt, dispatchResult)
+		}()
 	} else {
 		go func() {
 			cReader := &cachedReader{
@@ -359,8 +373,8 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 			if err != nil {
 				result = nil
 			}
-			d.observeTelemetry(ctx, ob.OriginalTarget, result, observedAt)
-			d.routedDispatch(ctx, outbound, destination)
+			dispatchResult := d.routedDispatch(ctx, outbound, destination, observedAt)
+			d.observeTelemetry(ctx, ob.OriginalTarget, result, observedAt, dispatchResult)
 		}()
 	}
 	return inbound, nil
@@ -384,6 +398,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		content = new(session.Content)
 		ctx = session.ContextWithContent(ctx, content)
 	}
+	observedAt := time.Now().UTC()
 
 	sessionInbound := session.InboundFromContext(ctx)
 	var user *protocol.MemoryUser
@@ -399,6 +414,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " error: ", err)
 			common.Close(outbound.Writer)
 			common.Interrupt(outbound.Reader)
+			d.observeTelemetry(ctx, destination, nil, observedAt, dispatchTelemetryResult{
+				Outcome:      telemetry.ConnectionOutcomeFailed,
+				FailureStage: telemetry.FailureStageDispatch,
+				Latency:      time.Since(observedAt),
+			})
 			return errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
@@ -409,6 +429,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			errors.LogInfo(ctx, "Limited ", user.Email, " by conn or ip")
 			common.Close(outbound.Writer)
 			common.Interrupt(outbound.Reader)
+			d.observeTelemetry(ctx, destination, nil, observedAt, dispatchTelemetryResult{
+				Outcome:      telemetry.ConnectionOutcomeFailed,
+				FailureStage: telemetry.FailureStageDispatch,
+				Latency:      time.Since(observedAt),
+			})
 			return errors.New("Limited ", user.Email, " by conn or ip")
 		}
 		var lm *LinkManager
@@ -451,10 +476,9 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	}
 
 	sniffingRequest := content.SniffingRequest
-	observedAt := time.Now().UTC()
 	if !sniffingRequest.Enabled {
-		d.observeTelemetry(ctx, destination, nil, observedAt)
-		d.routedDispatch(ctx, outbound, destination)
+		dispatchResult := d.routedDispatch(ctx, outbound, destination, observedAt)
+		d.observeTelemetry(ctx, destination, nil, observedAt, dispatchResult)
 	} else {
 		cReader := &cachedReader{
 			reader: outbound.Reader.(buf.TimeoutReader),
@@ -485,8 +509,8 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		if err != nil {
 			result = nil
 		}
-		d.observeTelemetry(ctx, ob.OriginalTarget, result, observedAt)
-		d.routedDispatch(ctx, outbound, destination)
+		dispatchResult := d.routedDispatch(ctx, outbound, destination, observedAt)
+		d.observeTelemetry(ctx, ob.OriginalTarget, result, observedAt, dispatchResult)
 	}
 
 	return nil
@@ -548,7 +572,12 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 	return contentResult, contentErr
 }
 
-func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
+func (d *DefaultDispatcher) routedDispatch(
+	ctx context.Context,
+	link *transport.Link,
+	destination net.Destination,
+	observedAt time.Time,
+) dispatchTelemetryResult {
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 
@@ -567,7 +596,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 			errors.LogError(ctx, "non existing tag for platform initialized detour: ", forcedOutboundTag)
 			common.Close(link.Writer)
 			common.Interrupt(link.Reader)
-			return
+			return failedDispatchResult(observedAt)
 		}
 	} else if d.router != nil {
 		if route, err := d.router.PickRoute(routingLink); err == nil {
@@ -584,7 +613,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 				errors.LogWarning(ctx, "non existing outTag: ", outTag)
 				common.Close(link.Writer)
 				common.Interrupt(link.Reader)
-				return // DO NOT CHANGE: the traffic shouldn't be processed by default outbound if the specified outbound tag doesn't exist (yet), e.g., VLESS Reverse Proxy
+				return failedDispatchResult(observedAt) // DO NOT CHANGE: the traffic shouldn't be processed by default outbound if the specified outbound tag doesn't exist (yet), e.g., VLESS Reverse Proxy
 			}
 		} else {
 			errors.LogInfo(ctx, "default route for ", destination)
@@ -599,7 +628,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 		errors.LogInfo(ctx, "default outbound handler not exist")
 		common.Close(link.Writer)
 		common.Interrupt(link.Reader)
-		return
+		return failedDispatchResult(observedAt)
 	}
 
 	ob.Tag = handler.Tag()
@@ -619,4 +648,18 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	handler.Dispatch(ctx, link)
+	return dispatchTelemetryResult{
+		Outcome:      telemetry.ConnectionOutcomeUnknown,
+		FailureStage: telemetry.FailureStageOutbound,
+		LossReason:   telemetry.LossReasonTerminalNotObservable,
+		Latency:      time.Since(observedAt),
+	}
+}
+
+func failedDispatchResult(observedAt time.Time) dispatchTelemetryResult {
+	return dispatchTelemetryResult{
+		Outcome:      telemetry.ConnectionOutcomeFailed,
+		FailureStage: telemetry.FailureStageRoute,
+		Latency:      time.Since(observedAt),
+	}
 }

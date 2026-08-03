@@ -53,21 +53,33 @@ func openTelemetryPipeline(node *conf.NodeConfig) (*telemetry.Pipeline, error) {
 	}
 	requestTimeout := time.Duration(config.RequestTimeoutSeconds) * time.Second
 	sender, err := telemetry.NewSender(telemetry.SenderConfig{
-		Endpoint: config.Endpoint,
-		Timeout:  requestTimeout,
-		NodeID:   uint64(node.NodeID),
-		APIKey:   node.Key,
+		Endpoint:        config.Endpoint,
+		ControlEndpoint: config.ControlEndpoint,
+		Timeout:         requestTimeout,
+		NodeID:          uint64(node.NodeID),
+		APIKey:          node.Key,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if err := sender.Probe(context.Background()); err != nil {
-		return nil, err
+	var initialControl *telemetry.ControlState
+	if config.ControlEndpoint == "" {
+		if err := sender.Probe(context.Background()); err != nil {
+			return nil, err
+		}
+	} else {
+		control, err := sender.FetchControl(context.Background(), 0)
+		if err != nil {
+			return nil, err
+		}
+		initialControl = &control
 	}
 	return telemetry.OpenRuntimePipeline(telemetry.RuntimeConfig{
 		NodeID:           uint64(node.NodeID),
 		APIKey:           node.Key,
 		Endpoint:         config.Endpoint,
+		ControlEndpoint:  config.ControlEndpoint,
+		InitialControl:   initialControl,
 		QueueDirectory:   config.QueueDirectory,
 		QueueMaxBytes:    config.QueueMaxBytes,
 		QueueMaxAge:      time.Duration(config.QueueMaxAgeSeconds) * time.Second,

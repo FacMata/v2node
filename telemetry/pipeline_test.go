@@ -183,3 +183,220 @@ func TestRetryAfterDelayHonorsServerBound(t *testing.T) {
 		t.Fatalf("capped retry delay = %s, want 30s", got)
 	}
 }
+
+func TestPipelineDropsPreviousEpochQueueWhenControlTurnsOff(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"accepted": 1, "duplicate": false},
+		})
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	pipeline := newTestPipeline(t, directory, server.URL)
+	pipeline.ApplyControl(ControlState{
+		CollectorEnabled: true,
+		Mode:             "observe",
+		ModeEpoch:        3,
+		ControlTTL:       time.Minute,
+	})
+	emission := Emission{
+		Sources: []SourceEnvelope{{SourceRef: "source", SourceIP: "1.2.3.4"}},
+		Events: []ConnectionEvent{{
+			ObservedAt:         time.Now().UTC(),
+			UserID:             42,
+			SourceRef:          "source",
+			DestinationAddress: "example.com",
+			DestinationKind:    DestinationDomain,
+			DestinationPort:    443,
+			Network:            NetworkTCP,
+			Outcome:            ConnectionOutcomeAccepted,
+			FailureStage:       FailureStageNone,
+			CompletenessStatus: CompletenessReady,
+			ObservationKind:    ObservationKindConnection,
+		}},
+	}
+	if err := pipeline.enqueueEmission(emission); err != nil {
+		t.Fatalf("enqueueEmission() error = %v", err)
+	}
+	if _, err := pipeline.queue.Peek(); err != nil {
+		t.Fatalf("Peek() before Off error = %v", err)
+	}
+
+	pipeline.ApplyControl(ControlState{
+		CollectorEnabled: false,
+		Mode:             "off",
+		ModeEpoch:        4,
+		ControlTTL:       time.Minute,
+	})
+	if _, err := pipeline.queue.Peek(); err != ErrQueueEmpty {
+		t.Fatalf("Peek() after Off error = %v, want ErrQueueEmpty", err)
+	}
+	if pipeline.Observe(Observation{NodeID: 7}) {
+		t.Fatal("Observe() accepted while collector disabled")
+	}
+	_ = pipeline.Close()
+}
+
+func TestPipelineDropsLegacyQueueWhenFirstControlEnablesV2(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"accepted": 1, "duplicate": false},
+		})
+	}))
+	defer server.Close()
+	pipeline := newTestPipeline(t, t.TempDir(), server.URL)
+	emission := Emission{
+		Sources: []SourceEnvelope{{SourceRef: "source", SourceIP: "1.2.3.4"}},
+		Events: []ConnectionEvent{{
+			ObservedAt:         time.Now().UTC(),
+			UserID:             42,
+			SourceRef:          "source",
+			DestinationAddress: "example.com",
+			DestinationKind:    DestinationDomain,
+			DestinationPort:    443,
+			Network:            NetworkTCP,
+			ObservationKind:    ObservationKindDispatch,
+		}},
+	}
+	if err := pipeline.enqueueEmission(emission); err != nil {
+		t.Fatalf("enqueueEmission() error = %v", err)
+	}
+	if _, err := pipeline.queue.Peek(); err != nil {
+		t.Fatalf("Peek() before initial control error = %v", err)
+	}
+	if err := pipeline.ApplyControl(ControlState{
+		CollectorEnabled: true,
+		Mode:             "observe",
+		ModeEpoch:        9,
+		ControlTTL:       time.Minute,
+	}); err != nil {
+		t.Fatalf("ApplyControl() error = %v", err)
+	}
+	if _, err := pipeline.queue.Peek(); err != ErrQueueEmpty {
+		t.Fatalf("Peek() after V2 control error = %v, want ErrQueueEmpty", err)
+	}
+	_ = pipeline.Close()
+}
+
+func TestPipelineRejectsStaleOrConflictingControlWithoutChangingState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"accepted": 1, "duplicate": false},
+		})
+	}))
+	defer server.Close()
+	pipeline := newTestPipeline(t, t.TempDir(), server.URL)
+	current := ControlState{
+		CollectorEnabled: true,
+		Mode:             "observe",
+		ModeEpoch:        5,
+		ControlTTL:       time.Minute,
+	}
+	if err := pipeline.ApplyControl(current); err != nil {
+		t.Fatalf("ApplyControl(current) error = %v", err)
+	}
+	if err := pipeline.ApplyControl(ControlState{
+		CollectorEnabled: false,
+		Mode:             "off",
+		ModeEpoch:        4,
+		ControlTTL:       time.Minute,
+	}); err == nil {
+		t.Fatal("ApplyControl() accepted stale epoch")
+	}
+	if pipeline.control.ModeEpoch != 5 || pipeline.control.Mode != "observe" {
+		t.Fatalf("control changed after stale epoch: %#v", pipeline.control)
+	}
+	if err := pipeline.ApplyControl(ControlState{
+		CollectorEnabled: false,
+		Mode:             "off",
+		ModeEpoch:        5,
+		ControlTTL:       time.Minute,
+	}); err == nil {
+		t.Fatal("ApplyControl() accepted conflicting state for current epoch")
+	}
+	if pipeline.control.ModeEpoch != 5 || pipeline.control.Mode != "observe" {
+		t.Fatalf("control changed after conflict: %#v", pipeline.control)
+	}
+	_ = pipeline.Close()
+}
+
+func TestPipelinePersistsControlEpochAcrossRestart(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"accepted": 1, "duplicate": false},
+		})
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	pipeline := newTestPipeline(t, directory, server.URL)
+	if err := pipeline.ApplyControl(ControlState{
+		CollectorEnabled: true,
+		Mode:             "observe",
+		ModeEpoch:        12,
+		ControlTTL:       time.Hour,
+	}); err != nil {
+		t.Fatalf("ApplyControl() error = %v", err)
+	}
+	if err := pipeline.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	pipeline = newTestPipeline(t, directory, server.URL)
+	if pipeline.control.ModeEpoch != 12 || pipeline.control.Mode != "observe" {
+		t.Fatalf("restored control = %#v", pipeline.control)
+	}
+	if err := pipeline.ApplyControl(ControlState{
+		CollectorEnabled: false,
+		Mode:             "off",
+		ModeEpoch:        11,
+		ControlTTL:       time.Hour,
+	}); err == nil {
+		t.Fatal("ApplyControl() accepted stale epoch after restart")
+	}
+	_ = pipeline.Close()
+}
+
+func TestPipelinePersistsPendingDropCountAcrossRestart(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"accepted": 1, "duplicate": false},
+		})
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	pipeline := newTestPipeline(t, directory, server.URL)
+	pipeline.recordDropped(4)
+	if err := pipeline.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	pipeline = newTestPipeline(t, directory, server.URL)
+	emission := Emission{
+		Sources: []SourceEnvelope{{SourceRef: "source", SourceIP: "1.2.3.4"}},
+		Events: []ConnectionEvent{{
+			ObservedAt:         time.Now().UTC(),
+			UserID:             42,
+			SourceRef:          "source",
+			DestinationAddress: "example.com",
+			DestinationKind:    DestinationDomain,
+			DestinationPort:    443,
+			Network:            NetworkTCP,
+			ObservationKind:    ObservationKindDispatch,
+		}},
+	}
+	if err := pipeline.enqueueEmission(emission); err != nil {
+		t.Fatalf("enqueueEmission() error = %v", err)
+	}
+	record, err := pipeline.queue.Peek()
+	if err != nil {
+		t.Fatalf("Peek() error = %v", err)
+	}
+	var batch Batch
+	if err := json.Unmarshal(record.Payload, &batch); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if batch.DroppedCountSincePreviousBatch != 4 {
+		t.Fatalf("dropped count = %d, want 4", batch.DroppedCountSincePreviousBatch)
+	}
+	_ = pipeline.Close()
+}

@@ -15,24 +15,36 @@ const (
 type ObservationKind string
 
 const (
-	ObservationKindDispatch ObservationKind = "dispatch"
+	ObservationKindDispatch   ObservationKind = "dispatch"
+	ObservationKindConnection ObservationKind = "connection"
 )
 
 type ConnectionEvent struct {
-	ObservedAt         time.Time
-	UserID             uint64
-	SourceRef          string
-	DestinationAddress string
-	DestinationKind    DestinationKind
-	DestinationPort    uint16
-	Network            Network
-	AppProtocol        AppProtocol
-	SniffSource        SniffSource
-	SniffConfidence    Confidence
-	UploadBytes        uint64
-	DownloadBytes      uint64
-	ActiveMilliseconds uint64
-	ObservationKind    ObservationKind
+	ObservedAt          time.Time
+	UserID              uint64
+	SourceRef           string
+	DestinationAddress  string
+	DestinationKind     DestinationKind
+	DestinationPort     uint16
+	Network             Network
+	AppProtocol         AppProtocol
+	SniffSource         SniffSource
+	SniffConfidence     Confidence
+	UploadBytes         uint64
+	DownloadBytes       uint64
+	ActiveMilliseconds  uint64
+	RuntimeListener     string
+	RuntimeListenPort   uint16
+	RuntimeSNI          string
+	RuntimeHTTPHost     string
+	RuntimeProtocol     AppProtocol
+	InboundTag          string
+	Outcome             ConnectionOutcome
+	FailureStage        FailureStage
+	LossReason          LossReason
+	LatencyMilliseconds uint64
+	CompletenessStatus  CompletenessStatus
+	ObservationKind     ObservationKind
 }
 
 type protectedEvent struct {
@@ -66,22 +78,39 @@ func (b *EventBuffer) Observe(observation Observation) bool {
 	if err != nil {
 		return false
 	}
+	observationKind := ObservationKindDispatch
+	completeness := observation.CompletenessStatus
+	if observation.Outcome != "" || completeness != "" {
+		observationKind = ObservationKindConnection
+		completeness = normalizeCompleteness(completeness)
+	}
 
 	event := ConnectionEvent{
-		ObservedAt:         observation.ObservedAt.UTC(),
-		UserID:             observation.UserID,
-		SourceRef:          source.Ref,
-		DestinationAddress: address,
-		DestinationKind:    kind,
-		DestinationPort:    observation.Destination.Port,
-		Network:            normalizeNetwork(observation.Network),
-		AppProtocol:        normalizeAppProtocol(observation.AppProtocol),
-		SniffSource:        normalizeSniffSource(observation.SniffSource),
-		SniffConfidence:    normalizeConfidence(observation.Confidence),
-		UploadBytes:        observation.UploadBytes,
-		DownloadBytes:      observation.DownloadBytes,
-		ActiveMilliseconds: observation.ActiveMillis,
-		ObservationKind:    ObservationKindDispatch,
+		ObservedAt:          observation.ObservedAt.UTC(),
+		UserID:              observation.UserID,
+		SourceRef:           source.Ref,
+		DestinationAddress:  address,
+		DestinationKind:     kind,
+		DestinationPort:     observation.Destination.Port,
+		Network:             normalizeNetwork(observation.Network),
+		AppProtocol:         normalizeAppProtocol(observation.AppProtocol),
+		SniffSource:         normalizeSniffSource(observation.SniffSource),
+		SniffConfidence:     normalizeConfidence(observation.Confidence),
+		UploadBytes:         observation.UploadBytes,
+		DownloadBytes:       observation.DownloadBytes,
+		ActiveMilliseconds:  observation.ActiveMillis,
+		RuntimeListener:     observation.RuntimeListener,
+		RuntimeListenPort:   observation.RuntimeListenPort,
+		RuntimeSNI:          observation.RuntimeSNI,
+		RuntimeHTTPHost:     observation.RuntimeHTTPHost,
+		RuntimeProtocol:     normalizeAppProtocol(observation.RuntimeProtocol),
+		InboundTag:          observation.InboundTag,
+		Outcome:             normalizeConnectionOutcome(observation.Outcome),
+		FailureStage:        normalizeFailureStage(observation.FailureStage),
+		LossReason:          observation.LossReason,
+		LatencyMilliseconds: observation.LatencyMilliseconds,
+		CompletenessStatus:  completeness,
+		ObservationKind:     observationKind,
 	}
 
 	b.mu.Lock()

@@ -55,6 +55,37 @@ const (
 	ConfidenceHigh    Confidence = "high"
 )
 
+type ConnectionOutcome string
+
+const (
+	ConnectionOutcomeUnknown  ConnectionOutcome = "unknown"
+	ConnectionOutcomeAccepted ConnectionOutcome = "accepted"
+	ConnectionOutcomeFailed   ConnectionOutcome = "failed"
+)
+
+type FailureStage string
+
+const (
+	FailureStageNone     FailureStage = "none"
+	FailureStageDispatch FailureStage = "dispatch"
+	FailureStageRoute    FailureStage = "route"
+	FailureStageOutbound FailureStage = "outbound"
+)
+
+type CompletenessStatus string
+
+const (
+	CompletenessPartial CompletenessStatus = "partial"
+	CompletenessReady   CompletenessStatus = "ready"
+)
+
+type LossReason string
+
+const (
+	LossReasonNone                  LossReason = ""
+	LossReasonTerminalNotObservable LossReason = "terminal_outcome_unobservable"
+)
+
 type Destination struct {
 	Address     string
 	Port        uint16
@@ -63,18 +94,29 @@ type Destination struct {
 }
 
 type Observation struct {
-	ObservedAt    time.Time
-	UserID        uint64
-	NodeID        uint64
-	SourceIP      netip.Addr
-	Destination   Destination
-	Network       Network
-	AppProtocol   AppProtocol
-	SniffSource   SniffSource
-	Confidence    Confidence
-	UploadBytes   uint64
-	DownloadBytes uint64
-	ActiveMillis  uint64
+	ObservedAt          time.Time
+	UserID              uint64
+	NodeID              uint64
+	SourceIP            netip.Addr
+	Destination         Destination
+	Network             Network
+	AppProtocol         AppProtocol
+	SniffSource         SniffSource
+	Confidence          Confidence
+	UploadBytes         uint64
+	DownloadBytes       uint64
+	ActiveMillis        uint64
+	RuntimeListener     string
+	RuntimeListenPort   uint16
+	RuntimeSNI          string
+	RuntimeHTTPHost     string
+	RuntimeProtocol     AppProtocol
+	InboundTag          string
+	Outcome             ConnectionOutcome
+	FailureStage        FailureStage
+	LossReason          LossReason
+	LatencyMilliseconds uint64
+	CompletenessStatus  CompletenessStatus
 }
 
 type Emission struct {
@@ -129,6 +171,31 @@ func normalizeConfidence(confidence Confidence) Confidence {
 	default:
 		return ConfidenceUnknown
 	}
+}
+
+func normalizeConnectionOutcome(outcome ConnectionOutcome) ConnectionOutcome {
+	switch outcome {
+	case ConnectionOutcomeAccepted, ConnectionOutcomeFailed:
+		return outcome
+	default:
+		return ConnectionOutcomeUnknown
+	}
+}
+
+func normalizeFailureStage(stage FailureStage) FailureStage {
+	switch stage {
+	case FailureStageDispatch, FailureStageRoute, FailureStageOutbound:
+		return stage
+	default:
+		return FailureStageNone
+	}
+}
+
+func normalizeCompleteness(status CompletenessStatus) CompletenessStatus {
+	if status == CompletenessReady {
+		return status
+	}
+	return CompletenessPartial
 }
 
 func normalizeDestination(value string) (string, DestinationKind, error) {

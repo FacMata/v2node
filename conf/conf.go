@@ -36,6 +36,7 @@ type NodeConfig struct {
 type TelemetryConfig struct {
 	Enabled                *bool  `mapstructure:"Enabled"`
 	Endpoint               string `mapstructure:"Endpoint"`
+	ControlEndpoint        string `mapstructure:"ControlEndpoint"`
 	QueueDirectory         string `mapstructure:"QueueDirectory"`
 	QueueMaxBytes          int64  `mapstructure:"QueueMaxBytes"`
 	QueueMaxAgeSeconds     int    `mapstructure:"QueueMaxAgeSeconds"`
@@ -91,7 +92,11 @@ func applyTelemetryDefaults(node *NodeConfig) {
 	}
 	if telemetry.Endpoint == "" {
 		telemetry.Endpoint = strings.TrimRight(node.APIHost, "/") +
-			"/api/v2/server/telemetry/connection-buckets"
+			"/api/v2/server/telemetry/connection-events"
+	}
+	if telemetry.ControlEndpoint == "" {
+		telemetry.ControlEndpoint = strings.TrimRight(node.APIHost, "/") +
+			"/api/v2/server/telemetry/control"
 	}
 	if telemetry.QueueDirectory == "" {
 		telemetry.QueueDirectory = filepath.Join(

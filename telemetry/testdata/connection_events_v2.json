@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "mode_epoch": 9,
+  "batch_id": "019fb5e9-8fb7-76ce-bb63-b9e38b2d94c9",
+  "node_id": 7,
+  "stream_id": "d3b30a72-222f-7b89-8d3e-cb0b9c9b8334",
+  "generated_at": "2026-08-03T08:15:01.000Z",
+  "collector_version": "contract-fixture-v2",
+  "sequence_first": 41,
+  "sequence_last": 41,
+  "dropped_count_since_previous_batch": 0,
+  "sources": [
+    {
+      "source_ref": "_sUlZaoM8Y9X189bOscoUA",
+      "source_ip": "203.0.113.7"
+    }
+  ],
+  "events": [
+    {
+      "event_id": "11ef97dd-038c-5720-9f44-c3f6a124bacc",
+      "sequence": 41,
+      "observed_at": "2026-08-03T08:15:00.000Z",
+      "user_id": 42,
+      "source_ref": "_sUlZaoM8Y9X189bOscoUA",
+      "destination_address": "service.example.com",
+      "destination_kind": "domain",
+      "destination_port": 443,
+      "network": "tcp",
+      "app_protocol": "tls",
+      "sniff_source": "tls_sni",
+      "sniff_confidence": "high",
+      "upload_bytes": 0,
+      "download_bytes": 0,
+      "active_milliseconds": 37,
+      "runtime_listener": "vless-inbound-7",
+      "runtime_listen_port": 443,
+      "runtime_sni": "service.example.com",
+      "runtime_http_host": "api.service.example.com",
+      "runtime_protocol": "tls",
+      "inbound_tag": "vless-inbound-7",
+      "outcome": "accepted",
+      "failure_stage": "none",
+      "latency_milliseconds": 37,
+      "completeness_status": "ready",
+      "observation_kind": "connection"
+    }
+  ]
+}

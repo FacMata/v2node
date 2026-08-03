@@ -15,6 +15,7 @@ type Sink interface {
 type CollectorConfig struct {
 	BufferSize    int
 	FlushInterval time.Duration
+	DropReporter  func(uint64)
 }
 
 type Collector struct {
@@ -77,14 +78,14 @@ func (c *Collector) Observe(observation Observation) bool {
 	c.lifecycle.RLock()
 	defer c.lifecycle.RUnlock()
 	if c.closed {
-		c.dropped.Add(1)
+		c.recordDrop()
 		return false
 	}
 	select {
 	case c.input <- observation:
 		return true
 	default:
-		c.dropped.Add(1)
+		c.recordDrop()
 		return false
 	}
 }
@@ -121,7 +122,7 @@ func (c *Collector) run(ctx context.Context) {
 		select {
 		case observation := <-c.input:
 			if !c.buffer.Observe(observation) {
-				c.dropped.Add(1)
+				c.recordDrop()
 			}
 		case <-ticker.C:
 			for c.flush() {
@@ -141,13 +142,20 @@ func (c *Collector) drainAndFlush() {
 		select {
 		case observation := <-c.input:
 			if !c.buffer.Observe(observation) {
-				c.dropped.Add(1)
+				c.recordDrop()
 			}
 		default:
 			for c.flush() {
 			}
 			return
 		}
+	}
+}
+
+func (c *Collector) recordDrop() {
+	c.dropped.Add(1)
+	if c.config.DropReporter != nil {
+		c.config.DropReporter(1)
 	}
 }
 

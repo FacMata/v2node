@@ -158,6 +158,43 @@ func TestDiskQueueExpiresOldestRecords(t *testing.T) {
 	}
 }
 
+func TestDiskQueueDropAllPersistsDroppedCountAcrossReopen(t *testing.T) {
+	directory := t.TempDir()
+	streamID := uuid.New()
+	key := bytes.Repeat([]byte{8}, 32)
+	queue := openTestQueue(t, directory, streamID, key)
+	for index, sequences := range [][2]uint64{{1, 3}, {4, 5}} {
+		if err := queue.Enqueue(QueueRecord{
+			ID:            uuid.New(),
+			CreatedAt:     time.Now().UTC(),
+			SequenceFirst: sequences[0],
+			SequenceLast:  sequences[1],
+			Payload:       []byte("payload"),
+		}); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", index, err)
+		}
+	}
+	if err := queue.DropAll(); err != nil {
+		t.Fatalf("DropAll() error = %v", err)
+	}
+	if err := queue.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	queue = openTestQueue(t, directory, streamID, key)
+	if queue.DroppedCount() != 5 {
+		t.Fatalf("dropped count after reopen = %d, want 5", queue.DroppedCount())
+	}
+	count, err := queue.TakeDroppedCount()
+	if err != nil {
+		t.Fatalf("TakeDroppedCount() error = %v", err)
+	}
+	if count != 5 {
+		t.Fatalf("taken dropped count = %d, want 5", count)
+	}
+	_ = queue.Close()
+}
+
 func TestDiskQueueConcurrentEnqueueHonorsMaxBytes(t *testing.T) {
 	directory := t.TempDir()
 	streamID := uuid.New()

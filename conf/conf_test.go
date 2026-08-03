@@ -25,8 +25,11 @@ func TestTelemetryDefaultsToEnabledForExistingNodeConfig(t *testing.T) {
 	if !node.Telemetry.IsEnabled() {
 		t.Fatal("telemetry defaulted to disabled")
 	}
-	if node.Telemetry.Endpoint != "https://panel.example.com/api/v2/server/telemetry/connection-buckets" {
+	if node.Telemetry.Endpoint != "https://panel.example.com/api/v2/server/telemetry/connection-events" {
 		t.Fatalf("endpoint = %q", node.Telemetry.Endpoint)
+	}
+	if node.Telemetry.ControlEndpoint != "https://panel.example.com/api/v2/server/telemetry/control" {
+		t.Fatalf("control endpoint = %q", node.Telemetry.ControlEndpoint)
 	}
 	if node.Telemetry.QueueDirectory != "/var/lib/v2node/telemetry/7" {
 		t.Fatalf("queue directory = %q", node.Telemetry.QueueDirectory)

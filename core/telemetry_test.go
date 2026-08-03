@@ -27,12 +27,21 @@ func TestTelemetryAdapterResolvesPanelUserAndNode(t *testing.T) {
 	}}, sink)
 
 	raw := telemetry.RawObservation{
-		ObservedAt:  time.Date(2026, 7, 29, 6, 0, 0, 0, time.UTC),
-		InboundTag:  "node-tag",
-		UserEmail:   "node-tag|user-uuid",
-		SourceIP:    netip.MustParseAddr("1.2.3.4"),
-		Destination: telemetry.Destination{Address: "1.1.1.1", Port: 80},
-		Network:     telemetry.NetworkTCP,
+		ObservedAt:          time.Date(2026, 7, 29, 6, 0, 0, 0, time.UTC),
+		InboundTag:          "node-tag",
+		UserEmail:           "node-tag|user-uuid",
+		SourceIP:            netip.MustParseAddr("1.2.3.4"),
+		Destination:         telemetry.Destination{Address: "1.1.1.1", Port: 80},
+		Network:             telemetry.NetworkTCP,
+		RuntimeListener:     "vless-inbound-7",
+		RuntimeListenPort:   443,
+		RuntimeSNI:          "service.example.com",
+		RuntimeProtocol:     telemetry.AppProtocolTLS,
+		Outcome:             telemetry.ConnectionOutcomeAccepted,
+		FailureStage:        telemetry.FailureStageNone,
+		LossReason:          telemetry.LossReasonTerminalNotObservable,
+		LatencyMilliseconds: 12,
+		CompletenessStatus:  telemetry.CompletenessReady,
 	}
 	if !adapter.ObserveRaw(raw) {
 		t.Fatal("ObserveRaw() rejected known user")
@@ -42,6 +51,12 @@ func TestTelemetryAdapterResolvesPanelUserAndNode(t *testing.T) {
 	}
 	if sink.got.SourceIP != raw.SourceIP || sink.got.Destination != raw.Destination {
 		t.Fatalf("resolved observation = %#v", sink.got)
+	}
+	if sink.got.RuntimeListener != raw.RuntimeListener ||
+		sink.got.Outcome != raw.Outcome ||
+		sink.got.LossReason != raw.LossReason ||
+		sink.got.CompletenessStatus != raw.CompletenessStatus {
+		t.Fatalf("runtime observation = %#v", sink.got)
 	}
 }
 
