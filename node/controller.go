@@ -2,11 +2,14 @@ package node
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/common/budget"
 	"github.com/wyx2685/v2node/common/task"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core"
@@ -14,6 +17,7 @@ import (
 )
 
 type Controller struct {
+	budgets                 *budget.Store
 	server                  *core.V2Core
 	apiClient               *panel.Client
 	tag                     string
@@ -64,6 +68,16 @@ func (c *Controller) Start(x *core.V2Core) error {
 		return fmt.Errorf("failed to get user alive list: %s", err)
 	}
 	c.tag = node.Tag
+	directory := c.conf.TrafficBudgetDirectory
+	if directory == "" {
+		identity := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", c.conf.APIHost, c.conf.NodeID)))
+		directory = filepath.Join("/var/lib/v2node/traffic", fmt.Sprintf("%x", identity[:16]))
+	}
+	c.budgets, err = budget.Open(directory, c.apiClient)
+	if err != nil {
+		return fmt.Errorf("open traffic budget: %w", err)
+	}
+	c.server.SetUserBudgets(c.tag, c.userList, c.budgets)
 
 	// add limiter
 	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
@@ -108,6 +122,9 @@ func (c *Controller) Close() error {
 	err := c.server.DelNode(c.tag)
 	if err != nil {
 		return fmt.Errorf("del node error: %s", err)
+	}
+	if c.budgets != nil {
+		return c.budgets.Close()
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/common/budget"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
@@ -40,6 +41,14 @@ func (v *V2Core) GetUserManager(tag string) (proxy.UserManager, error) {
 		return nil, fmt.Errorf("handler %s is not implement proxy.UserManager", tag)
 	}
 	return userManager, nil
+}
+
+func (v *V2Core) SetUserBudgets(tag string, users []panel.UserInfo, store *budget.Store) {
+	for _, user := range users {
+		if user.TrafficBudget {
+			v.dispatcher.Budgets.Store(format.UserTag(tag, user.Uuid), store.Account(user.Id))
+		}
+	}
 }
 
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
@@ -80,12 +89,15 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 		c := v.(*counter.TrafficCounter)
 		c.Counters.Range(func(key, value interface{}) bool {
 			email := key.(string)
+			if _, managed := vc.dispatcher.Budgets.Load(email); managed {
+				return true
+			}
 			traffic := value.(*counter.TrafficStorage)
 			up := traffic.UpCounter.Load()
 			down := traffic.DownCounter.Load()
 			if up+down > int64(mintraffic*1000) {
-				traffic.UpCounter.Store(0)
-				traffic.DownCounter.Store(0)
+				traffic.UpCounter.Add(-up)
+				traffic.DownCounter.Add(-down)
 				if vc.users.uidMap[email] == 0 {
 					c.Delete(email)
 					return true

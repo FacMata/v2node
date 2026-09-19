@@ -18,10 +18,11 @@ type OnlineUser struct {
 }
 
 type UserInfo struct {
-	Id          int    `json:"id" msgpack:"id"`
-	Uuid        string `json:"uuid" msgpack:"uuid"`
-	SpeedLimit  int    `json:"speed_limit" msgpack:"speed_limit"`
-	DeviceLimit int    `json:"device_limit" msgpack:"device_limit"`
+	TrafficBudget bool   `json:"traffic_budget" msgpack:"traffic_budget"`
+	Id            int    `json:"id" msgpack:"id"`
+	Uuid          string `json:"uuid" msgpack:"uuid"`
+	SpeedLimit    int    `json:"speed_limit" msgpack:"speed_limit"`
+	DeviceLimit   int    `json:"device_limit" msgpack:"device_limit"`
 }
 
 type UserListBody struct {
@@ -39,6 +40,7 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 		SetContext(ctx).
 		SetHeader("If-None-Match", c.userEtag).
 		SetHeader("X-Response-Format", "msgpack").
+		SetHeader("X-Traffic-Budget", "1").
 		SetDoNotParseResponse(true).
 		Get(path)
 	if err != nil {
@@ -89,6 +91,9 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 		}
 	}
 	c.userEtag = r.Header().Get("ETag")
+	if userlist.Users == nil {
+		userlist.Users = []UserInfo{}
+	}
 	return userlist.Users, nil
 }
 

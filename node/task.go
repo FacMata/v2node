@@ -106,11 +106,16 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		c.limiter.AliveList = newA
 	}
 	// node no changed, check users
-	if len(newU) == 0 {
+	if newU == nil {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}
 	deleted, added, modified := compareUserList(c.userList, newU)
+	// Reinstall changed users so existing unlimited links cannot survive enrollment.
+	for _, u := range modified {
+		deleted = append(deleted, u)
+		added = append(added, u)
+	}
 	if len(deleted) > 0 {
 		// have deleted users
 		err = c.server.DelUsers(deleted, c.tag, c.info)
@@ -123,6 +128,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		}
 	}
 	if len(added) > 0 {
+		c.server.SetUserBudgets(c.tag, added, c.budgets)
 		// have added users
 		_, err = c.server.AddUsers(&vCore.AddUsersParams{
 			Tag:      c.tag,

@@ -25,12 +25,13 @@ type LogConfig struct {
 }
 
 type NodeConfig struct {
-	APIHost    string          `mapstructure:"ApiHost"`
-	NodeID     int             `mapstructure:"NodeID"`
-	Key        string          `mapstructure:"ApiKey"`
-	Timeout    int             `mapstructure:"Timeout"`
-	RetryCount *int            `mapstructure:"RetryCount"`
-	Telemetry  TelemetryConfig `mapstructure:"Telemetry"`
+	TrafficBudgetDirectory string          `mapstructure:"TrafficBudgetDirectory"`
+	APIHost                string          `mapstructure:"ApiHost"`
+	NodeID                 int             `mapstructure:"NodeID"`
+	Key                    string          `mapstructure:"ApiKey"`
+	Timeout                int             `mapstructure:"Timeout"`
+	RetryCount             *int            `mapstructure:"RetryCount"`
+	Telemetry              TelemetryConfig `mapstructure:"Telemetry"`
 }
 
 type TelemetryConfig struct {

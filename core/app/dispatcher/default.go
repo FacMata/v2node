@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wyx2685/v2node/common/budget"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/rate"
 	"github.com/wyx2685/v2node/limiter"
@@ -102,6 +103,7 @@ func (r *cachedReader) Interrupt() {
 
 // DefaultDispatcher is a default implementation of Dispatcher.
 type DefaultDispatcher struct {
+	Budgets      sync.Map // user tag -> *budget.Account, shared by both transfer directions
 	ohm          outbound.Manager
 	router       routing.Router
 	policy       policy.Manager
@@ -194,7 +196,7 @@ func (d *DefaultDispatcher) observeTelemetry(
 	}
 }
 
-func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
+func (d *DefaultDispatcher) getLink(ctx context.Context, datagram bool) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
 	opt := pipe.OptionsFromContext(ctx)
 	uplinkReader, uplinkWriter := pipe.New(opt...)
 	downlinkReader, downlinkWriter := pipe.New(opt...)
@@ -278,6 +280,11 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			Counter: downcounter,
 			Writer:  outboundLink.Writer,
 		}
+		if account, ok := d.Budgets.Load(user.Email); ok {
+			sessionInbound.CanSpliceCopy = 3
+			inboundLink.Writer = &budgetWriter{writer: inboundLink.Writer, account: account.(*budget.Account), upload: true, datagram: datagram}
+			outboundLink.Writer = &budgetWriter{writer: outboundLink.Writer, account: account.(*budget.Account), datagram: datagram}
+		}
 	}
 
 	return inboundLink, outboundLink, limit, nil
@@ -337,7 +344,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	}
 	sniffingRequest := content.SniffingRequest
 	observedAt := time.Now().UTC()
-	inbound, outbound, _, err := d.getLink(ctx)
+	inbound, outbound, _, err := d.getLink(ctx, destination.Network == net.Network_UDP)
 	if err != nil {
 		d.observeTelemetry(ctx, destination, nil, observedAt, dispatchTelemetryResult{
 			Outcome:      telemetry.ConnectionOutcomeFailed,
@@ -481,6 +488,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		outbound.Writer = &dispatcher.SizeStatWriter{
 			Counter: downcounter,
 			Writer:  outbound.Writer,
+		}
+		if account, ok := d.Budgets.Load(user.Email); ok {
+			sessionInbound.CanSpliceCopy = 3
+			outbound.Reader = &budgetReader{reader: outbound.Reader, account: account.(*budget.Account), datagram: destination.Network == net.Network_UDP}
+			outbound.Writer = &budgetWriter{writer: outbound.Writer, account: account.(*budget.Account), datagram: destination.Network == net.Network_UDP}
 		}
 	}
 

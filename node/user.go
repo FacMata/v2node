@@ -9,6 +9,11 @@ import (
 )
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
+	if c.budgets != nil {
+		if err := c.budgets.Report(ctx); err != nil {
+			return err
+		}
+	}
 	var reportmin = 0
 	var devicemin = 0
 	if c.info.Common.BaseConfig != nil {
@@ -84,7 +89,7 @@ func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []pane
 		if o, ok := oldMap[u.Uuid]; !ok {
 			added = append(added, u)
 		} else {
-			if o.SpeedLimit != u.SpeedLimit || o.DeviceLimit != u.DeviceLimit {
+			if o.SpeedLimit != u.SpeedLimit || o.DeviceLimit != u.DeviceLimit || o.TrafficBudget != u.TrafficBudget {
 				modified = append(modified, u)
 			}
 			delete(oldMap, u.Uuid)
