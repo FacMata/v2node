@@ -90,12 +90,16 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 			userlist.Users = append(userlist.Users, u)
 		}
 	}
-	c.userEtag = r.Header().Get("ETag")
+	c.pendingUserEtag = r.Header().Get("ETag")
 	if userlist.Users == nil {
 		userlist.Users = []UserInfo{}
 	}
 	return userlist.Users, nil
 }
+
+// ConfirmUserList advances the conditional request version only after the
+// controller has installed the downloaded users successfully.
+func (c *Client) ConfirmUserList() { c.userEtag = c.pendingUserEtag }
 
 // GetUserAlive will fetch the alive_ip count for users
 func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {

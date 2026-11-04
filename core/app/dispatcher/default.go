@@ -230,29 +230,22 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, datagram bool) (*transp
 			return nil, nil, nil, errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
-		w, reject := limit.CheckLimit(user.Email,
+		w, release, reason := limit.CheckLimit(user.Email,
 			sessionInbound.Source.Address.IP().String(),
 			sessionInbound.Source.Network == net.Network_TCP)
-		if reject {
-			errors.LogInfo(ctx, "Limited ", user.Email, " by conn or ip")
+		if reason != "" {
 			common.Close(outboundLink.Writer)
 			common.Close(inboundLink.Writer)
 			common.Interrupt(outboundLink.Reader)
 			common.Interrupt(inboundLink.Reader)
-			return nil, nil, nil, errors.New("Limited ", user.Email, " by conn or ip")
+			return nil, nil, nil, errors.New("connection rejected: ", reason)
 		}
-		var lm *LinkManager
-		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
-			lm = &LinkManager{
-				links: make(map[*ManagedWriter]buf.Reader),
-			}
-			d.LinkManagers.Store(user.Email, lm)
-		} else {
-			lm = lmloaded.(*LinkManager)
-		}
+		lmloaded, _ := d.LinkManagers.LoadOrStore(user.Email, &LinkManager{links: make(map[*ManagedWriter]buf.Reader)})
+		lm := lmloaded.(*LinkManager)
 		managedWriter := &ManagedWriter{
 			writer:  uplinkWriter,
 			manager: lm,
+			release: release,
 		}
 		lm.AddLink(managedWriter, outboundLink.Reader)
 		inboundLink.Writer = managedWriter
@@ -438,11 +431,10 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			return errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
-		w, reject := limit.CheckLimit(user.Email,
+		w, release, reason := limit.CheckLimit(user.Email,
 			sessionInbound.Source.Address.IP().String(),
 			sessionInbound.Source.Network == net.Network_TCP)
-		if reject {
-			errors.LogInfo(ctx, "Limited ", user.Email, " by conn or ip")
+		if reason != "" {
 			common.Close(outbound.Writer)
 			common.Interrupt(outbound.Reader)
 			d.observeTelemetry(ctx, destination, nil, observedAt, dispatchTelemetryResult{
@@ -450,20 +442,14 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 				FailureStage: telemetry.FailureStageDispatch,
 				Latency:      time.Since(observedAt),
 			})
-			return errors.New("Limited ", user.Email, " by conn or ip")
+			return errors.New("connection rejected: ", reason)
 		}
-		var lm *LinkManager
-		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
-			lm = &LinkManager{
-				links: make(map[*ManagedWriter]buf.Reader),
-			}
-			d.LinkManagers.Store(user.Email, lm)
-		} else {
-			lm = lmloaded.(*LinkManager)
-		}
+		lmloaded, _ := d.LinkManagers.LoadOrStore(user.Email, &LinkManager{links: make(map[*ManagedWriter]buf.Reader)})
+		lm := lmloaded.(*LinkManager)
 		managedWriter := &ManagedWriter{
 			writer:  outbound.Writer,
 			manager: lm,
+			release: release,
 		}
 		outbound.Writer = managedWriter
 		if w != nil {

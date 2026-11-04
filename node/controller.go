@@ -102,6 +102,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 		return fmt.Errorf("add users error: %s", err)
 	}
 	log.WithField("tag", c.tag).Infof("Added %d new users", added)
+	c.apiClient.ConfirmUserList()
 	c.info = node
 	c.startTasks(node)
 	return nil

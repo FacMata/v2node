@@ -10,15 +10,35 @@ import (
 type ManagedWriter struct {
 	writer  buf.Writer
 	manager *LinkManager
+	release func()
+	once    sync.Once
 }
 
 func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	return w.writer.WriteMultiBuffer(mb)
+	err := w.writer.WriteMultiBuffer(mb)
+	if err != nil {
+		w.finish()
+	}
+	return err
+}
+
+func (w *ManagedWriter) finish() {
+	w.once.Do(func() {
+		if w.release != nil {
+			w.release()
+		}
+		w.manager.RemoveWriter(w)
+	})
 }
 
 func (w *ManagedWriter) Close() error {
-	w.manager.RemoveWriter(w)
+	w.finish()
 	return common.Close(w.writer)
+}
+
+func (w *ManagedWriter) Interrupt() {
+	w.finish()
+	common.Interrupt(w.writer)
 }
 
 type LinkManager struct {
@@ -29,10 +49,14 @@ type LinkManager struct {
 
 func (m *LinkManager) AddLink(writer *ManagedWriter, reader buf.Reader) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.closed {
-		m.links[writer] = reader
+	if m.closed {
+		m.mu.Unlock()
+		common.Close(writer)
+		common.Interrupt(reader)
+		return
 	}
+	m.links[writer] = reader
+	m.mu.Unlock()
 }
 
 func (m *LinkManager) RemoveWriter(writer *ManagedWriter) {
@@ -56,7 +80,7 @@ func (m *LinkManager) CloseAll() {
 	m.mu.Unlock()
 
 	for w, r := range links {
-		common.Close(w.writer)
+		common.Close(w)
 		common.Interrupt(r)
 	}
 }

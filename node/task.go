@@ -103,7 +103,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 
 	// update alive list
 	if newA != nil {
-		c.limiter.AliveList = newA
+		c.limiter.SetAliveList(newA)
 	}
 	// node no changed, check users
 	if newU == nil {
@@ -111,6 +111,8 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 	deleted, added, modified := compareUserList(c.userList, newU)
+	limiterDeleted := append([]panel.UserInfo(nil), deleted...)
+	limiterAdded := append([]panel.UserInfo(nil), added...)
 	// Reinstall changed users so existing unlimited links cannot survive enrollment.
 	for _, u := range modified {
 		deleted = append(deleted, u)
@@ -145,9 +147,10 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	}
 	if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
 		// update Limiter
-		c.limiter.UpdateUser(c.tag, added, deleted, modified)
+		c.limiter.UpdateUser(c.tag, limiterAdded, limiterDeleted, modified)
 	}
 	c.userList = newU
+	c.apiClient.ConfirmUserList()
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	return nil
 }
