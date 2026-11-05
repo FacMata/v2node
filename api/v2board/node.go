@@ -5,13 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"encoding/json"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Security type
@@ -132,26 +134,25 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if r == nil {
 		return nil, fmt.Errorf("received nil response")
 	}
+	defer func() {
+		if r.RawBody() != nil {
+			r.RawBody().Close()
+		}
+	}()
 
-	if r.StatusCode() == 304 {
+	if r.StatusCode() == http.StatusNotModified {
+		if c.responseBodyHash == "" {
+			return nil, c.rejectNodeConfig("uninitialized_304", r.StatusCode())
+		}
 		return nil, nil
+	}
+	if r.StatusCode() != http.StatusOK {
+		return nil, c.rejectNodeConfig("http_status", r.StatusCode())
 	}
 	hash := sha256.Sum256(r.Body())
 	newBodyHash := hex.EncodeToString(hash[:])
 	if c.responseBodyHash == newBodyHash {
 		return nil, nil
-	}
-	c.responseBodyHash = newBodyHash
-	c.nodeEtag = r.Header().Get("ETag")
-
-	if r != nil {
-		defer func() {
-			if r.RawBody() != nil {
-				r.RawBody().Close()
-			}
-		}()
-	} else {
-		return nil, fmt.Errorf("received nil response")
 	}
 	node = &NodeInfo{
 		Id: c.NodeId,
@@ -160,7 +161,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	cm := &CommonNode{}
 	err = json.Unmarshal(r.Body(), cm)
 	if err != nil {
-		return nil, fmt.Errorf("decode node params error: %s", err)
+		return nil, c.rejectNodeConfig("json_decode", r.StatusCode())
 	}
 	switch cm.Protocol {
 	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless":
@@ -170,7 +171,21 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		node.Type = cm.Protocol
 		node.Security = 0
 	default:
-		return nil, fmt.Errorf("unsupport protocol: %s", cm.Protocol)
+		return nil, c.rejectNodeConfig("protocol", r.StatusCode())
+	}
+	if cm.ServerPort < 1 || cm.ServerPort > 65535 {
+		return nil, c.rejectNodeConfig("server_port", r.StatusCode())
+	}
+	if cm.BaseConfig == nil {
+		return nil, c.rejectNodeConfig("base_config", r.StatusCode())
+	}
+	node.PushInterval, err = intervalToTime(cm.BaseConfig.PushInterval)
+	if err != nil {
+		return nil, c.rejectNodeConfig("push_interval", r.StatusCode())
+	}
+	node.PullInterval, err = intervalToTime(cm.BaseConfig.PullInterval)
+	if err != nil {
+		return nil, c.rejectNodeConfig("pull_interval", r.StatusCode())
 	}
 	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
 	cf := cm.TlsSettings.CertFile
@@ -204,27 +219,45 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		cm.CertInfo.TlsCert = cm.TlsSettings.TlsCert
 		cm.CertInfo.TlsKey = cm.TlsSettings.TlsKey
 	}
-	// set interval
-	node.PushInterval = intervalToTime(cm.BaseConfig.PushInterval)
-	node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
-
 	node.Common = cm
-
+	// Only a successfully parsed and validated response may become the baseline.
+	// Otherwise an error page followed by the unchanged config would cause reload.
+	c.responseBodyHash = newBodyHash
+	c.nodeEtag = r.Header().Get("ETag")
 	return node, nil
 }
 
-func intervalToTime(i interface{}) time.Duration {
-	switch reflect.TypeOf(i).Kind() {
-	case reflect.Int:
-		return time.Duration(i.(int)) * time.Second
-	case reflect.String:
-		i, _ := strconv.Atoi(i.(string))
-		return time.Duration(i) * time.Second
-	case reflect.Float64:
-		return time.Duration(i.(float64)) * time.Second
+func (c *Client) rejectNodeConfig(stage string, status int) error {
+	log.WithFields(log.Fields{
+		"event": "node_config_rejected", "node_id": c.NodeId,
+		"stage": stage, "http_status": status,
+	}).Warn("node configuration response rejected")
+	return fmt.Errorf("node config rejected: stage=%s http_status=%d", stage, status)
+}
+
+func intervalToTime(i interface{}) (time.Duration, error) {
+	var seconds int64
+	switch v := i.(type) {
+	case int:
+		seconds = int64(v)
+	case string:
+		var err error
+		seconds, err = strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid interval")
+		}
+	case float64:
+		seconds = int64(v)
+		if float64(seconds) != v {
+			return 0, fmt.Errorf("invalid interval")
+		}
 	default:
-		return time.Duration(reflect.ValueOf(i).Int()) * time.Second
+		return 0, fmt.Errorf("invalid interval")
 	}
+	if seconds <= 0 || seconds > int64((time.Duration(1<<63-1))/time.Second) {
+		return 0, fmt.Errorf("invalid interval")
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 func (t TlsSettings) EffectiveServerNames() []string {
