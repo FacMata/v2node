@@ -1,7 +1,8 @@
 # Managed host agent
 
 2026-11-07: first implementation validated locally; not deployed. Supported:
-Linux amd64/systemd, one fixed v2node.service. One management panel can control a
+Linux amd64/systemd, one fixed root-run v2node.service matching the inventoried
+fleet. Other service users need an explicit permissions adaptation. One management panel can control a
 service containing nodes from multiple business panels.
 
 The panel and node implementation contracts live in FMPanel/docs. This document
