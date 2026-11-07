@@ -66,12 +66,16 @@ func Prepare(stateDir, layout, managedDir, binary, manifest, signature, keyFile,
 	if err := os.MkdirAll(versionDir, 0700); err != nil {
 		return err
 	}
+	var existingBusiness []byte
 	for _, name := range []string{"v2node.service", "v2node-agent.service"} {
 		old, err := os.ReadFile(filepath.Join("/etc/systemd/system", name))
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		if err == nil {
+			if name == "v2node.service" {
+				existingBusiness = old
+			}
 			if err := os.WriteFile(filepath.Join(stateDir, name+".before-managed"), old, 0600); err != nil {
 				return err
 			}
@@ -91,9 +95,24 @@ func Prepare(stateDir, layout, managedDir, binary, manifest, signature, keyFile,
 			return err
 		}
 	}
-	business := fmt.Sprintf("[Unit]\nDescription=v2node managed proxy service\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=300\nStartLimitBurst=3\n\n[Service]\nType=simple\nExecStart=%s/current server --config %s --managed-dir %s\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=120\nLimitNOFILE=1048576\n\n[Install]\nWantedBy=multi-user.target\n", layout, serverConfig, managedDir)
+	if err := os.MkdirAll("/usr/local/v2node", 0755); err != nil {
+		return err
+	}
+	business := "[Unit]\nDescription=v2node managed proxy service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=/usr/local/v2node\nLimitNOFILE=1048576\n\n[Install]\nWantedBy=multi-user.target\n"
+	dropin := fmt.Sprintf("[Unit]\nStartLimitIntervalSec=300\nStartLimitBurst=3\n[Service]\nExecStart=\nExecStart=%s/current server --config %s --managed-dir %s\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=120\n", layout, serverConfig, managedDir)
+	if !strings.Contains(string(existingBusiness), "XRAY_LOCATION_ASSET") {
+		dropin += "Environment=XRAY_LOCATION_ASSET=/usr/local/v2node\n"
+	}
 	agent := fmt.Sprintf("[Unit]\nDescription=v2node management agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=%s/agent-current agent run --state-dir %s\nRestart=on-failure\nRestartSec=30\nTimeoutStopSec=1500\n\n[Install]\nWantedBy=multi-user.target\n", layout, stateDir)
-	if err := os.WriteFile("/etc/systemd/system/v2node.service", []byte(business), 0644); err != nil {
+	if existingBusiness == nil {
+		if err := os.WriteFile("/etc/systemd/system/v2node.service", []byte(business), 0644); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll("/etc/systemd/system/v2node.service.d", 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile("/etc/systemd/system/v2node.service.d/50-managed-exec.conf", []byte(dropin), 0644); err != nil {
 		return err
 	}
 	if err := os.WriteFile("/etc/systemd/system/v2node-agent.service", []byte(agent), 0644); err != nil {

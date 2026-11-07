@@ -39,7 +39,7 @@ jobs:
           [[ "$MIN_AGENT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$RELEASE_SEQUENCE" =~ ^[1-9][0-9]*$ ]]
       - name: Validate managed-host modules
-        run: go test ./internal/hostagent ./common/management ./cmd
+        run: go test ./internal/hostagent ./common/management ./cmd ./node ./api/v2board ./core ./common/budget
       - name: Build fixed-version binary
         run: |
           mkdir release_assets

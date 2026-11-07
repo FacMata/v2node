@@ -3,6 +3,7 @@ package hostagent
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -192,4 +193,39 @@ func SignRelease(binary, keyFile, output, version, commit, minimum string, seque
 		return err
 	}
 	return os.WriteFile(output+".sig", []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(key, raw))), 0644)
+}
+
+func GenerateSigningKey(privatePath, publicPath string) error {
+	if privatePath == publicPath {
+		return errors.New("private and public key paths must differ")
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	secret, err := os.OpenFile(privatePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err = secret.WriteString(base64.StdEncoding.EncodeToString(private)); err != nil {
+		secret.Close()
+		os.Remove(privatePath)
+		return err
+	}
+	if err = secret.Close(); err != nil {
+		os.Remove(privatePath)
+		return err
+	}
+	key, err := os.OpenFile(publicPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		os.Remove(privatePath)
+		return err
+	}
+	if _, err = key.WriteString(base64.StdEncoding.EncodeToString(public)); err != nil {
+		key.Close()
+		os.Remove(privatePath)
+		os.Remove(publicPath)
+		return err
+	}
+	return key.Close()
 }

@@ -185,7 +185,17 @@ func (c *Controller) syncManagedConfig(ctx context.Context) error {
 	if err := c.applyManagedConfig(envelope, candidate, fetchErr); err != nil {
 		return err
 	}
-	return c.apiClient.AckManaged(ctx)
+	c.applyMu.Lock()
+	if c.closed {
+		c.applyMu.Unlock()
+		return nil
+	}
+	ack, err := c.apiClient.ManagedAckPayload()
+	c.applyMu.Unlock()
+	if err != nil {
+		return err
+	}
+	return c.apiClient.SendManagedAck(ctx, ack)
 }
 
 func (c *Controller) applyManagedConfig(envelope *panel.ManagedEnvelope, candidate *panel.NodeInfo, fetchErr error) error {

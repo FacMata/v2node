@@ -43,6 +43,15 @@ func init() {
 		_ = sign.MarkFlagRequired(name)
 	}
 	agent.AddCommand(sign)
+	var privateOutput, publicOutput string
+	keygen := &cobra.Command{Use: "signing-keygen", Args: cobra.NoArgs, Short: "Create an Ed25519 release keypair in new files (never print the private key)", RunE: func(_ *cobra.Command, _ []string) error {
+		return hostagent.GenerateSigningKey(privateOutput, publicOutput)
+	}}
+	keygen.Flags().StringVar(&privateOutput, "private-key-file", "", "New private key file")
+	keygen.Flags().StringVar(&publicOutput, "public-key-file", "", "New public key file")
+	_ = keygen.MarkFlagRequired("private-key-file")
+	_ = keygen.MarkFlagRequired("public-key-file")
+	agent.AddCommand(keygen)
 	var layout, managedDir, bridge, manifest, signature, pubkey, serverConfig string
 	prepare := &cobra.Command{Use: "prepare", Args: cobra.NoArgs, Short: "Prepare signed bridge files and systemd units; do not activate services", RunE: func(_ *cobra.Command, _ []string) error {
 		return hostagent.Prepare(directory, layout, managedDir, bridge, manifest, signature, pubkey, serverConfig)

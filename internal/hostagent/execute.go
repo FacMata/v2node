@@ -109,6 +109,13 @@ func service(ctx context.Context, verb string) error {
 	if verb == "daemon-reload" {
 		args = []string{verb}
 	}
+	// The journal owns the recovery budget. A previous manual start must not
+	// consume systemd's burst allowance and prevent an authorized recovery.
+	if verb == "start" || verb == "restart" {
+		if err := exec.CommandContext(ctx, "/usr/bin/systemctl", "reset-failed", "v2node.service").Run(); err != nil {
+			return errors.New("cannot reset service start limit for authorized operation")
+		}
+	}
 	if err := exec.CommandContext(ctx, "/usr/bin/systemctl", args...).Run(); err != nil {
 		return fmt.Errorf("systemd %s failed", verb)
 	}
@@ -329,6 +336,10 @@ func execute(ctx context.Context, client *http.Client, state identity, cfg *Inst
 		manifest, verifyErr := verifyRelease(*op.Release, cfg.PublicKey)
 		if verifyErr != nil {
 			return fail("SIGNATURE_INVALID", verifyErr)
+		}
+		tooOld, compatErr := versionLess(cfg.AgentVersion, manifest.MinAgentVersion)
+		if compatErr != nil || tooOld {
+			return fail("INCOMPATIBLE_RELEASE", errors.New("agent does not meet rollback release minimum version"))
 		}
 		j.Result.ToVersion = &manifest.Version
 		j.To, err = filepath.EvalSymlinks(filepath.Join(cfg.Layout, "previous"))

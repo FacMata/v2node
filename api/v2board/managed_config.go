@@ -211,21 +211,27 @@ func (c *Client) ConfigGeneration() int {
 	return c.bootstrapGeneration
 }
 
-func (c *Client) AckManaged(ctx context.Context) error {
+// ManagedAckPayload persists the sequence while the controller owns its local
+// lifecycle lock. The subsequent network send does not mutate persisted state.
+func (c *Client) ManagedAckPayload() (map[string]any, error) {
 	s := c.managed
 	if s == nil {
-		return errors.New("managed state not initialized")
+		return nil, errors.New("managed state not initialized")
 	}
 	s.Sequence++
 	if err := c.StoreManaged(s); err != nil {
-		return err
+		return nil, err
 	}
-	var response any
 	var digest *string
 	if s.Digest != "" {
 		digest = &s.Digest
 	}
-	return c.managedRequest(ctx, "/ack", map[string]any{"node_id": c.NodeId, "credential_generation": s.Generation,
+	return map[string]any{"node_id": c.NodeId, "credential_generation": s.Generation,
 		"report_seq": s.Sequence, "boot_id": c.ConfigBootID, "revision": s.Revision, "attempt": s.Attempt, "payload_digest": digest,
-		"reported_current": s.CurrentRevision, "observed_leaf_sha256": s.Leaf, "result": s.Result}, &response)
+		"reported_current": s.CurrentRevision, "observed_leaf_sha256": s.Leaf, "result": s.Result}, nil
+}
+
+func (c *Client) SendManagedAck(ctx context.Context, payload map[string]any) error {
+	var response any
+	return c.managedRequest(ctx, "/ack", payload, &response)
 }
