@@ -1,10 +1,6 @@
 package core
 
 import (
-	"fmt"
-
-	"encoding/json"
-
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf"
 )
@@ -17,15 +13,11 @@ func buildDefaultOutbound(domainStrategy string) (*core.OutboundHandlerConfig, e
 	//sendthrough := "origin"
 	//outboundDetourConfig.SendThrough = &sendthrough
 
-	proxySetting := &conf.FreedomConfig{
-		DomainStrategy: domainStrategy,
+	outboundDetourConfig.StreamSetting = &conf.StreamConfig{
+		SocketSettings: &conf.SocketConfig{
+			DomainStrategy: domainStrategy,
+		},
 	}
-	var setting json.RawMessage
-	setting, err := json.Marshal(proxySetting)
-	if err != nil {
-		return nil, fmt.Errorf("marshal proxy config error: %s", err)
-	}
-	outboundDetourConfig.Settings = &setting
 	return outboundDetourConfig.Build()
 }
 
