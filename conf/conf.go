@@ -25,6 +25,8 @@ type LogConfig struct {
 }
 
 type NodeConfig struct {
+	ConfigToken            string          `mapstructure:"ConfigToken"`
+	ConfigDirectory        string          `mapstructure:"ConfigDirectory"`
 	TrafficBudgetDirectory string          `mapstructure:"TrafficBudgetDirectory"`
 	APIHost                string          `mapstructure:"ApiHost"`
 	NodeID                 int             `mapstructure:"NodeID"`

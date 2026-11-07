@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"reflect"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -49,8 +50,23 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 }
 
 func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
+	if c.conf.ConfigToken != "" {
+		if err := c.syncManagedConfig(ctx); err != nil {
+			log.WithField("tag", c.tag).Warn("Managed config remains unconfirmed: ", err)
+		}
+	}
+	c.applyMu.Lock()
+	if c.closed {
+		c.applyMu.Unlock()
+		return nil
+	}
+	currentInfo := c.info
+	c.applyMu.Unlock()
 	// get node info
-	newN, err := c.apiClient.GetNodeInfo(ctx)
+	var newN *panel.NodeInfo
+	if c.conf.ConfigToken == "" {
+		newN, err = c.apiClient.GetNodeInfo(ctx)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -61,7 +77,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		}).Error("Get node info failed")
 		return nil
 	}
-	if newN != nil {
+	if newN != nil && !reflect.DeepEqual(newN, currentInfo) {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 		}).Error("Got new node info, reload")
@@ -102,6 +118,11 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	}
 
 	// update alive list
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	if c.closed {
+		return nil
+	}
 	if newA != nil {
 		c.limiter.SetAliveList(newA)
 	}

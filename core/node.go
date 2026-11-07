@@ -18,6 +18,11 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 	return nil
 }
 
+func (v *V2Core) ValidateNode(tag string, info *panel.NodeInfo) error {
+	_, err := buildInbound(info, tag)
+	return err
+}
+
 func (v *V2Core) DelNode(tag string) error {
 	err := v.removeInbound(tag)
 	if err != nil {

@@ -1,0 +1,61 @@
+name: Signed managed-host release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version tag (vX.Y.Z)
+        required: true
+      min_agent_version:
+        description: Minimum compatible management agent version
+        required: true
+      release_sequence:
+        description: Monotonically increasing release sequence
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: managed-host-release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.repository == 'FacMata/v2node' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: managed-release
+    env:
+      GOEXPERIMENT: jsonv2
+      CGO_ENABLED: '0'
+      VERSION: ${{ inputs.version }}
+      MIN_AGENT: ${{ inputs.min_agent_version }}
+      RELEASE_SEQUENCE: ${{ inputs.release_sequence }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+      - name: Validate release inputs
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$MIN_AGENT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$RELEASE_SEQUENCE" =~ ^[1-9][0-9]*$ ]]
+      - name: Validate managed-host modules
+        run: go test ./internal/hostagent ./common/management ./cmd
+      - name: Build fixed-version binary
+        run: |
+          mkdir release_assets
+          go build -trimpath -ldflags "-X github.com/wyx2685/v2node/cmd.version=$VERSION -s -w" -o release_assets/v2node-linux-amd64 .
+      - name: Sign manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.MANAGED_RELEASE_SIGNING_KEY }}
+        shell: bash
+        run: |
+          test -n "$RELEASE_SIGNING_KEY"
+          umask 077
+          keyfile="$RUNNER_TEMP/managed-release-key"
+          trap 'rm "$keyfile"' EXIT
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$keyfile"
+          ./release_assets/v2node-linux-amd64 agent sign-release --binary release_assets/v2node-linux-amd64 --key-file "$keyfile" --manifest release_assets/manifest.json --release-version "$VERSION" --commit "$GITHUB_SHA" --min-agent-version "$MIN_AGENT" --sequence "$RELEASE_SEQUENCE"
+      - name: Publish immutable assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$VERSION" release_assets/v2node-linux-amd64 release_assets/manifest.json release_assets/manifest.json.sig --target "$GITHUB_SHA" --title "$VERSION" --generate-notes

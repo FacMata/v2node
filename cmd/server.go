@@ -7,11 +7,14 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/wyx2685/v2node/common/management"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core"
 	"github.com/wyx2685/v2node/limiter"
@@ -39,12 +42,34 @@ func init() {
 		BoolVarP(&watch, "watch", "w",
 			true, "watch file path change")
 	command.AddCommand(&serverCommand)
+	serverCommand.PersistentFlags().StringVar(&management.Directory, "managed-dir", "", "Explicit managed maintenance and readiness directory")
 }
 
 func serverHandle(_ *cobra.Command, _ []string) {
 	showVersion()
 	c := conf.New()
 	err := c.LoadFromPath(config)
+	var frozen *management.Snapshot
+	if management.Directory != "" {
+		if err := os.MkdirAll(management.Directory, 0700); err != nil {
+			log.Error("Cannot open managed directory")
+			return
+		}
+		_ = os.Remove(filepath.Join(management.Directory, "ready.json"))
+		active, stateErr := management.Frozen(management.Directory)
+		if stateErr != nil {
+			log.Error("Cannot inspect maintenance state")
+			return
+		}
+		if active {
+			frozen, stateErr = management.LoadFrozen(management.Directory)
+			if stateErr != nil {
+				log.Error("Cannot load frozen startup")
+				return
+			}
+			c, err = frozen.Config, nil
+		}
+	}
 	log.SetFormatter(&log.TextFormatter{
 		DisableTimestamp: true,
 		DisableQuote:     true,
@@ -83,7 +108,12 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	//init limiter
 	limiter.Init()
 	//get node info
-	nodes, err := node.New(c.NodeConfigs)
+	var nodes *node.Node
+	if frozen != nil {
+		nodes, err = node.NewFrozen(c.NodeConfigs, frozen.Nodes)
+	} else {
+		nodes, err = node.New(c.NodeConfigs)
+	}
 	if err != nil {
 		log.WithField("err", err).Error("Get node info failed")
 		return
@@ -117,6 +147,25 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		return
 	}
 	log.Info("Nodes started")
+	if _, err := management.Publish(management.Directory, version, c, nodes.NodeInfos); err != nil {
+		log.Error("Cannot publish managed readiness")
+		_ = nodes.Close()
+		_ = v2core.Close()
+		_ = telemetryManager.Close()
+		return
+	}
+	if management.Directory != "" {
+		defer os.Remove(filepath.Join(management.Directory, "ready.json"))
+	}
+	reportContext, stopReporting := context.WithCancel(context.Background())
+	defer stopReporting()
+	if management.Directory != "" {
+		go func() {
+			if err := management.ReportLoop(reportContext, management.Directory); err != nil {
+				log.Warn("Managed business confirmation unavailable; forwarding remains active")
+			}
+		}()
+	}
 	if watch {
 		// On file change, just signal reload; do not run reload concurrently here
 		err = c.Watch(config, func() {
@@ -154,6 +203,36 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			}
 			return
 		case <-reloadCh:
+			if management.Directory != "" {
+				active, stateErr := management.Frozen(management.Directory)
+				gate, gateErr := management.Gate(management.Directory)
+				if active || stateErr != nil || gateErr != nil {
+					if gate != nil {
+						_ = gate.Unlock()
+					}
+					time.AfterFunc(time.Second, func() {
+						select {
+						case reloadCh <- struct{}{}:
+						default:
+						}
+					})
+					continue
+				}
+				_ = os.Remove(filepath.Join(management.Directory, "ready.json"))
+				err := reload(config, &nodes, &v2core, &telemetryManager)
+				if err == nil {
+					err = c.LoadFromPath(config)
+				}
+				if err == nil {
+					_, err = management.Publish(management.Directory, version, c, nodes.NodeInfos)
+				}
+				_ = gate.Unlock()
+				if err != nil {
+					log.Error("Managed reload failed; service is not ready")
+					return
+				}
+				continue
+			}
 			log.Info("收到重启信号，正在重新加载配置...")
 			if err := reload(config, &nodes, &v2core, &telemetryManager); err != nil {
 				log.WithField("err", err).Panic("重启失败")

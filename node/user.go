@@ -9,6 +9,13 @@ import (
 )
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
+	c.applyMu.Lock()
+	if c.closed {
+		c.applyMu.Unlock()
+		return nil
+	}
+	baseConfig := c.info.Common.BaseConfig
+	c.applyMu.Unlock()
 	if c.budgets != nil {
 		if err := c.budgets.Report(ctx); err != nil {
 			return err
@@ -16,9 +23,9 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	}
 	var reportmin = 0
 	var devicemin = 0
-	if c.info.Common.BaseConfig != nil {
-		reportmin = c.info.Common.BaseConfig.NodeReportMinTraffic
-		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
+	if baseConfig != nil {
+		reportmin = baseConfig.NodeReportMinTraffic
+		devicemin = baseConfig.DeviceOnlineMinTraffic
 	}
 	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
 	if len(userTraffic) > 0 {

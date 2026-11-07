@@ -14,9 +14,24 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/wyx2685/v2node/common/file"
+	"github.com/wyx2685/v2node/common/management"
 )
 
 func (c *Controller) renewCertTask(_ context.Context) error {
+	if management.Directory != "" {
+		frozen, err := management.Frozen(management.Directory)
+		if err != nil {
+			return err
+		}
+		if frozen {
+			return nil
+		}
+		gate, err := management.Gate(management.Directory)
+		if err != nil {
+			return nil
+		}
+		defer gate.Unlock()
+	}
 	l, err := NewLego(c.info.Common.CertInfo)
 	if err != nil {
 		log.WithField("tag", c.tag).Info("new lego error: ", err)

@@ -119,6 +119,9 @@ type EncSettings struct {
 }
 
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
+	if c.ConfigToken != "" {
+		return c.ManagedStartup(ctx)
+	}
 	const path = "/api/v2/server/config"
 	r, err := c.client.
 		R().
@@ -141,8 +144,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if c.responseBodyHash == newBodyHash {
 		return nil, nil
 	}
-	c.responseBodyHash = newBodyHash
-	c.nodeEtag = r.Header().Get("ETag")
+	if r.StatusCode() >= 400 {
+		return nil, fmt.Errorf("node config HTTP %d", r.StatusCode())
+	}
 
 	if r != nil {
 		defer func() {
@@ -153,14 +157,27 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	} else {
 		return nil, fmt.Errorf("received nil response")
 	}
+	node, err = c.parseNodeInfo(r.Body())
+	if err != nil {
+		return nil, err
+	}
+	c.responseBodyHash = newBodyHash
+	c.nodeEtag = r.Header().Get("ETag")
+	return node, nil
+}
+
+func (c *Client) parseNodeInfo(body []byte) (node *NodeInfo, err error) {
 	node = &NodeInfo{
 		Id: c.NodeId,
 	}
 	// parse protocol params
 	cm := &CommonNode{}
-	err = json.Unmarshal(r.Body(), cm)
+	err = json.Unmarshal(body, cm)
 	if err != nil {
 		return nil, fmt.Errorf("decode node params error: %s", err)
+	}
+	if cm.BaseConfig == nil || cm.BaseConfig.PushInterval == nil || cm.BaseConfig.PullInterval == nil {
+		return nil, fmt.Errorf("node config requires push/pull intervals")
 	}
 	switch cm.Protocol {
 	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless":
@@ -207,6 +224,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	// set interval
 	node.PushInterval = intervalToTime(cm.BaseConfig.PushInterval)
 	node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
+	if node.PushInterval <= 0 || node.PullInterval <= 0 {
+		return nil, fmt.Errorf("node intervals must be positive seconds")
+	}
 
 	node.Common = cm
 
@@ -223,7 +243,7 @@ func intervalToTime(i interface{}) time.Duration {
 	case reflect.Float64:
 		return time.Duration(i.(float64)) * time.Second
 	default:
-		return time.Duration(reflect.ValueOf(i).Int()) * time.Second
+		return 0
 	}
 }
 

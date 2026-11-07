@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -17,6 +18,9 @@ import (
 )
 
 type Controller struct {
+	applyMu                 sync.Mutex
+	closed                  bool
+	onConfigApplied         func(*panel.NodeInfo) error
 	budgets                 *budget.Store
 	server                  *core.V2Core
 	apiClient               *panel.Client
@@ -89,6 +93,13 @@ func (c *Controller) Start(x *core.V2Core) error {
 		}
 	}
 	// Add new tag
+	if c.conf.ConfigToken != "" && c.apiClient.ManagedState() == nil {
+		node, err = c.materialize(node, "baseline")
+		if err != nil {
+			return err
+		}
+		c.info = node
+	}
 	err = c.server.AddNode(c.tag, node)
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
@@ -104,12 +115,20 @@ func (c *Controller) Start(x *core.V2Core) error {
 	log.WithField("tag", c.tag).Infof("Added %d new users", added)
 	c.apiClient.ConfirmUserList()
 	c.info = node
+	if c.conf.ConfigToken != "" {
+		if err := c.finishManagedStartup(node); err != nil {
+			return err
+		}
+	}
 	c.startTasks(node)
 	return nil
 }
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	c.closed = true
 	limiter.DeleteLimiter(c.tag)
 	if c.nodeInfoMonitorPeriodic != nil {
 		c.nodeInfoMonitorPeriodic.Close()
@@ -120,12 +139,12 @@ func (c *Controller) Close() error {
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
 	}
-	err := c.server.DelNode(c.tag)
-	if err != nil {
-		return fmt.Errorf("del node error: %s", err)
+	var err error
+	if c.server != nil && c.tag != "" {
+		err = c.server.DelNode(c.tag)
 	}
 	if c.budgets != nil {
-		return c.budgets.Close()
+		err = errors.Join(err, c.budgets.Close())
 	}
-	return nil
+	return err
 }

@@ -1,8 +1,11 @@
 package panel
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -15,19 +18,29 @@ import (
 // Panel is the interface for different panel's api.
 
 type Client struct {
-	client           *resty.Client
-	APIHost          string
-	Token            string
-	NodeId           int
-	nodeEtag         string
-	userEtag         string
-	pendingUserEtag  string
-	responseBodyHash string
-	UserList         *UserListBody
-	AliveMap         *AliveMap
+	ConfigToken         string
+	ConfigDirectory     string
+	ConfigBootID        string
+	managed             *ManagedConfigState
+	bootstrapGeneration int
+	client              *resty.Client
+	APIHost             string
+	Token               string
+	NodeId              int
+	nodeEtag            string
+	userEtag            string
+	pendingUserEtag     string
+	responseBodyHash    string
+	UserList            *UserListBody
+	AliveMap            *AliveMap
 }
 
 func New(c *conf.NodeConfig) (*Client, error) {
+	configDirectory := c.ConfigDirectory
+	if c.ConfigToken != "" && configDirectory == "" {
+		hash := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", c.APIHost, c.NodeID)))
+		configDirectory = filepath.Join("/var/lib/v2node/config", fmt.Sprintf("%x", hash[:16]))
+	}
 	client := resty.New()
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
@@ -56,6 +69,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		"token":     c.Key,
 	})
 	return &Client{
+		ConfigToken: c.ConfigToken, ConfigDirectory: configDirectory, ConfigBootID: uuid.NewString(),
 		client:   client,
 		Token:    c.Key,
 		APIHost:  c.APIHost,
