@@ -84,3 +84,30 @@ func TestConcurrentOnlineStateAndModifiedUsers(t *testing.T) {
 		t.Fatal(reason)
 	}
 }
+
+func TestAnyTLSAdmissionCannotSurvivePolicyChangeOrReadd(t *testing.T) {
+	l, key, u := testLimiter()
+	_, finishOriginal, reason, original := l.Admit(key, "192.0.2.1", true)
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	defer finishOriginal()
+	u.SpeedLimit = 10
+	l.UpdateUser("test", nil, nil, []panel.UserInfo{u})
+	if reason := l.AdmissionStatus(key, original); reason != "user_policy_changed" {
+		t.Fatalf("stale admission after policy change: %q", reason)
+	}
+	bucket, release, reason, updated := l.Admit(key, "192.0.2.1", true)
+	if reason != "" || bucket == nil || l.AdmissionStatus(key, updated) != "" {
+		t.Fatalf("current speed policy not applied: bucket=%v reason=%q", bucket, reason)
+	}
+	defer release()
+	l.UpdateUser("test", nil, []panel.UserInfo{u}, nil)
+	if reason := l.AdmissionStatus(key, updated); reason != UserMissing {
+		t.Fatalf("revoked admission: %q", reason)
+	}
+	l.UpdateUser("test", []panel.UserInfo{u}, nil, nil)
+	if reason := l.AdmissionStatus(key, updated); reason != "user_policy_changed" {
+		t.Fatalf("stale admission after same-user readd: %q", reason)
+	}
+}

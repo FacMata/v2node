@@ -107,14 +107,13 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	// get user alive
 	newA, err := c.apiClient.GetUserAlive(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
-		}).Error("Get alive list failed")
-		return nil
+		}).Warn("Get alive list failed; keeping the previous snapshot")
 	}
 
 	// update alive list
@@ -134,10 +133,16 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	deleted, added, modified := compareUserList(c.userList, newU)
 	limiterDeleted := append([]panel.UserInfo(nil), deleted...)
 	limiterAdded := append([]panel.UserInfo(nil), added...)
+	anyTLS := c.info.Type == "anytls"
 	// Reinstall changed users so existing unlimited links cannot survive enrollment.
 	for _, u := range modified {
 		deleted = append(deleted, u)
 		added = append(added, u)
+	}
+	if anyTLS && len(modified)+len(limiterDeleted) > 0 {
+		c.server.SetUserBudgets(c.tag, modified, c.budgets)
+		// Publish policy before closing old links so concurrent streams cannot keep old permissions.
+		c.limiter.UpdateUser(c.tag, nil, limiterDeleted, modified)
 	}
 	if len(deleted) > 0 {
 		// have deleted users
@@ -151,7 +156,15 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		}
 	}
 	if len(added) > 0 {
-		c.server.SetUserBudgets(c.tag, added, c.budgets)
+		if anyTLS {
+			c.server.SetUserBudgets(c.tag, limiterAdded, c.budgets)
+			if len(limiterAdded) > 0 {
+				// AnyTLS can publish its asynchronous auth batch before AddUsers returns.
+				c.limiter.UpdateUser(c.tag, limiterAdded, nil, nil)
+			}
+		} else {
+			c.server.SetUserBudgets(c.tag, added, c.budgets)
+		}
 		// have added users
 		_, err = c.server.AddUsers(&vCore.AddUsersParams{
 			Tag:      c.tag,
@@ -159,6 +172,10 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 			Users:    added,
 		})
 		if err != nil {
+			if anyTLS && len(limiterAdded) > 0 {
+				// A partially published auth batch must not admit users from a failed update.
+				c.limiter.UpdateUser(c.tag, nil, limiterAdded, nil)
+			}
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
@@ -166,7 +183,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 			return nil
 		}
 	}
-	if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
+	if !anyTLS && (len(added) > 0 || len(deleted) > 0) {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, limiterAdded, limiterDeleted, modified)
 	}

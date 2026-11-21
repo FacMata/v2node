@@ -69,7 +69,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive(context.Background())
 	if err != nil {
-		return fmt.Errorf("failed to get user alive list: %s", err)
+		log.WithError(err).WithField("tag", node.Tag).Warn("Starting without an online device snapshot")
 	}
 	c.tag = node.Tag
 	directory := c.conf.TrafficBudgetDirectory

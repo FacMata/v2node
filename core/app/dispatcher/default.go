@@ -230,10 +230,14 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, datagram bool) (*transp
 			return nil, nil, nil, errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
-		w, release, reason := limit.CheckLimit(user.Email,
+		w, release, reason, policy := limit.Admit(user.Email,
 			sessionInbound.Source.Address.IP().String(),
 			sessionInbound.Source.Network == net.Network_TCP)
 		if reason != "" {
+			if reason == limiter.UserMissing && sessionInbound.Name == "anytls" && sessionInbound.Conn != nil {
+				// AnyTLS caches the user for the mux session. Reauthenticate on a fresh transport.
+				common.Close(sessionInbound.Conn)
+			}
 			common.Close(outboundLink.Writer)
 			common.Close(inboundLink.Writer)
 			common.Interrupt(outboundLink.Reader)
@@ -248,6 +252,19 @@ func (d *DefaultDispatcher) getLink(ctx context.Context, datagram bool) (*transp
 			release: release,
 		}
 		lm.AddLink(managedWriter, outboundLink.Reader)
+		if sessionInbound.Name == "anytls" {
+			// A policy update can finish between initial admission and link registration.
+			if reason := limit.AdmissionStatus(user.Email, policy); reason != "" {
+				common.Close(managedWriter)
+				common.Close(outboundLink.Writer)
+				common.Interrupt(inboundLink.Reader)
+				common.Interrupt(outboundLink.Reader)
+				if reason == limiter.UserMissing && sessionInbound.Conn != nil {
+					common.Close(sessionInbound.Conn)
+				}
+				return nil, nil, nil, errors.New("connection rejected: ", reason)
+			}
+		}
 		inboundLink.Writer = managedWriter
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
