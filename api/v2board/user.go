@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 
 	"encoding/json/jsontext"
@@ -51,8 +53,11 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	}
 	defer r.RawResponse.Body.Close()
 
-	if r.StatusCode() == 304 {
+	if r.StatusCode() == http.StatusNotModified {
 		return nil, nil
+	}
+	if r.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("user list returned HTTP %d", r.StatusCode())
 	}
 	userlist := &UserListBody{}
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
@@ -78,6 +83,7 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 		if tok.Kind() != '[' {
 			return nil, fmt.Errorf(`decode user list error: expected "users" array`)
 		}
+		userlist.Users = []UserInfo{}
 		for dec.PeekKind() != ']' {
 			val, err := dec.ReadValue()
 			if err != nil {
@@ -90,10 +96,10 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 			userlist.Users = append(userlist.Users, u)
 		}
 	}
-	c.pendingUserEtag = r.Header().Get("ETag")
 	if userlist.Users == nil {
-		userlist.Users = []UserInfo{}
+		return nil, fmt.Errorf(`decode user list error: expected "users" array`)
 	}
+	c.pendingUserEtag = r.Header().Get("ETag")
 	return userlist.Users, nil
 }
 
@@ -103,30 +109,29 @@ func (c *Client) ConfirmUserList() { c.userEtag = c.pendingUserEtag }
 
 // GetUserAlive will fetch the alive_ip count for users
 func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
-	c.AliveMap = &AliveMap{}
 	const path = "/api/v1/server/UniProxy/alivelist"
 	r, err := c.client.R().
 		SetContext(ctx).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
+		var requestErr *url.Error
+		if errors.As(err, &requestErr) {
+			return nil, requestErr.Err
 		}
-		c.AliveMap.Alive = make(map[int]int)
-		return c.AliveMap.Alive, nil
+		return nil, err
 	}
-	if r == nil || r.RawResponse == nil || r.StatusCode() >= 399 {
-		c.AliveMap.Alive = make(map[int]int)
-		return c.AliveMap.Alive, nil
+	if r.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("alive list returned HTTP %d", r.StatusCode())
 	}
-	defer r.RawResponse.Body.Close()
-	if err := json.Unmarshal(r.Body(), c.AliveMap); err != nil {
-		fmt.Printf("unmarshal user alive list error: %s", err)
-		c.AliveMap.Alive = make(map[int]int)
+	var snapshot AliveMap
+	if err := json.Unmarshal(r.Body(), &snapshot); err != nil {
+		return nil, fmt.Errorf("decode alive list: %w", err)
 	}
-
-	return c.AliveMap.Alive, nil
+	if snapshot.Alive == nil {
+		return nil, fmt.Errorf(`decode alive list: expected "alive" object`)
+	}
+	return snapshot.Alive, nil
 }
 
 type UserTraffic struct {

@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 
@@ -35,12 +34,9 @@ type Limiter struct {
 }
 
 type UserLimitInfo struct {
-	UID               int
-	SpeedLimit        int
-	DeviceLimit       int
-	DynamicSpeedLimit int
-	ExpireTime        int64
-	OverLimit         bool
+	UID         int
+	SpeedLimit  int
+	DeviceLimit int
 }
 
 func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList map[int]int) *Limiter {
@@ -64,7 +60,6 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList m
 		if users[i].DeviceLimit != 0 {
 			userLimit.DeviceLimit = users[i].DeviceLimit
 		}
-		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), userLimit)
 	}
 	l.UUIDtoUID = uuidmap
@@ -105,10 +100,10 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 	}
 	for i := range modified {
 		if v, ok := l.UserLimitInfo.Load(format.UserTag(tag, modified[i].Uuid)); ok {
-			u := v.(*UserLimitInfo)
+			u := *v.(*UserLimitInfo)
 			u.SpeedLimit = modified[i].SpeedLimit
 			u.DeviceLimit = modified[i].DeviceLimit
-			l.UserLimitInfo.Store(format.UserTag(tag, modified[i].Uuid), u)
+			l.UserLimitInfo.Store(format.UserTag(tag, modified[i].Uuid), &u)
 		}
 		limit := int64(determineSpeedLimit(l.SpeedLimit, modified[i].SpeedLimit)) * 1000000 / 8
 		if limit > 0 {
@@ -129,28 +124,13 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		}
 		if added[i].SpeedLimit != 0 {
 			userLimit.SpeedLimit = added[i].SpeedLimit
-			userLimit.ExpireTime = 0
 		}
 		if added[i].DeviceLimit != 0 {
 			userLimit.DeviceLimit = added[i].DeviceLimit
 		}
-		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
 		l.UUIDtoUID[added[i].Uuid] = added[i].Id
 	}
-}
-
-func (l *Limiter) UpdateDynamicSpeedLimit(tag, uuid string, limit int, expire time.Time) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if v, ok := l.UserLimitInfo.Load(format.UserTag(tag, uuid)); ok {
-		info := v.(*UserLimitInfo)
-		info.DynamicSpeedLimit = limit
-		info.ExpireTime = expire.Unix()
-	} else {
-		return errors.New("not found")
-	}
-	return nil
 }
 
 func (l *Limiter) SetAliveList(alive map[int]int) {
@@ -162,6 +142,20 @@ func (l *Limiter) SetAliveList(alive map[int]int) {
 var rejectMissing atomic.Uint64
 var rejectDevice atomic.Uint64
 
+const UserMissing = "user_missing"
+
+// AdmissionStatus checks the policy used by a stream entering the link manager.
+func (l *Limiter) AdmissionStatus(key string, admitted *UserLimitInfo) string {
+	current, ok := l.UserLimitInfo.Load(key)
+	if !ok {
+		return UserMissing
+	}
+	if current != admitted {
+		return "user_policy_changed"
+	}
+	return ""
+}
+
 func recordReject(reason string, count *atomic.Uint64) {
 	n := count.Add(1)
 	if n == 1 || n%100 == 0 {
@@ -171,7 +165,12 @@ func recordReject(reason string, count *atomic.Uint64) {
 
 // CheckLimit acquires an active IP reference. The caller must release it when
 // its logical link closes, including errors and user revocation.
-func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (DynamicBucket *rate.DynamicBucket, release func(), reason string) {
+func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (*rate.DynamicBucket, func(), string) {
+	bucket, release, reason, _ := l.Admit(taguuid, ip, noUDPsource)
+	return bucket, release, reason
+}
+
+func (l *Limiter) Admit(taguuid string, ip string, noUDPsource bool) (DynamicBucket *rate.DynamicBucket, release func(), reason string, policy *UserLimitInfo) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	// check if ipv4 mapped ipv6
@@ -184,22 +183,13 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	var uid int
 	if v, ok := l.UserLimitInfo.Load(taguuid); ok {
 		u := v.(*UserLimitInfo)
+		policy = u
 		deviceLimit = u.DeviceLimit
 		uid = u.UID
-		if u.ExpireTime < time.Now().Unix() && u.ExpireTime != 0 {
-			if u.SpeedLimit != 0 {
-				userLimit = u.SpeedLimit
-				u.DynamicSpeedLimit = 0
-				u.ExpireTime = 0
-			} else {
-				l.UserLimitInfo.Delete(taguuid)
-			}
-		} else {
-			userLimit = determineSpeedLimit(u.SpeedLimit, u.DynamicSpeedLimit)
-		}
+		userLimit = u.SpeedLimit
 	} else {
-		recordReject("user_missing", &rejectMissing)
-		return nil, nil, "user_missing"
+		recordReject(UserMissing, &rejectMissing)
+		return nil, nil, UserMissing, nil
 	}
 	if noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic" {
 		newipMap := new(sync.Map)
@@ -210,7 +200,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 		known := currentKnown || oldKnown || l.activeIPs[taguuid][ip] > 0
 		if !known && deviceLimit > 0 && deviceLimit <= l.aliveList[uid] {
 			recordReject("device_limit", &rejectDevice)
-			return nil, nil, "device_limit"
+			return nil, nil, "device_limit", nil
 		}
 		current.Store(ip, uid)
 		if l.activeIPs[taguuid] == nil {
@@ -234,14 +224,14 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	limit := int64(determineSpeedLimit(nodeLimit, userLimit)) * 1000000 / 8 // If you need the Speed limit
 	if limit > 0 {
 		if v, ok := l.SpeedLimiter.Load(taguuid); ok {
-			return v.(*rate.DynamicBucket), release, ""
+			return v.(*rate.DynamicBucket), release, "", policy
 		} else {
 			d := rate.NewDynamicBucket(limit)
 			l.SpeedLimiter.Store(taguuid, d)
-			return d, release, ""
+			return d, release, "", policy
 		}
 	} else {
-		return nil, release, ""
+		return nil, release, "", policy
 	}
 }
 
